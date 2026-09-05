@@ -13,10 +13,12 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from metrics import compute_metrics_record
 
 from rendering import (
     instruction_distribution,
@@ -25,6 +27,8 @@ from rendering import (
     select_display_sample,
 )
 
+from computational_life.analysis.lineage import LineageRecorder
+from computational_life.analysis.replication import classify, replication_score, replication_scores
 from computational_life.experiments.base import load_bff_soup_config
 from computational_life.substrates.bff.interpreter import BffInterpreter
 from computational_life.substrates.bff.universe import BffSoupUniverse
@@ -49,15 +53,25 @@ def _init_universe(config_name: str, seed_override: int | None) -> None:
         )
     st.session_state.config = config
     st.session_state.universe = BffSoupUniverse(config.universe)
-    st.session_state.history = [st.session_state.universe.summary()]
+    st.session_state.history = [compute_metrics_record(st.session_state.universe)]
     st.session_state.playing = False
+    st.session_state.scan_results = None
+    if st.session_state.get("track_lineage"):
+        recorder = LineageRecorder()
+        recorder.record(st.session_state.universe)
+        st.session_state.lineage_recorder = recorder
+    else:
+        st.session_state.lineage_recorder = None
 
 
 def _step(num_epochs: int) -> None:
     universe: BffSoupUniverse = st.session_state.universe
     for _ in range(num_epochs):
         universe.step_epoch()
-    st.session_state.history.append(universe.summary())
+        recorder: LineageRecorder | None = st.session_state.get("lineage_recorder")
+        if recorder is not None:
+            recorder.record(universe)
+    st.session_state.history.append(compute_metrics_record(universe))
 
 
 st.title("Computational Life Lab")
@@ -101,6 +115,17 @@ with st.sidebar:
         help="Larger populations are subsampled for display; the simulation "
         "itself always runs on the full population.",
     )
+
+    st.divider()
+    st.header("Analysis")
+    track_lineage = st.checkbox("Track lineage (memory-heavy)", key="track_lineage")
+    if track_lineage and st.session_state.get("lineage_recorder") is None:
+        recorder = LineageRecorder()
+        recorder.record(st.session_state.universe)
+        st.session_state.lineage_recorder = recorder
+        st.caption("Recording started now -- ancestry from before this point isn't available.")
+    elif not track_lineage:
+        st.session_state.lineage_recorder = None
 
 universe: BffSoupUniverse = st.session_state.universe
 config = st.session_state.config
@@ -174,8 +199,62 @@ with right:
 
     st.caption(
         "These are raw, purely descriptive population statistics -- not "
-        "replicator or species classifications. Replication detection is a "
-        "separate analysis step (spec section 13), not yet implemented."
+        "replicator or species classifications. See 'Scan for candidate "
+        "replicators' below for an actual replication-detection pass "
+        "(spec section 13)."
+    )
+
+st.divider()
+st.subheader("Diversity, entropy & complexity")
+st.caption(
+    "Three distinct 'entropy' quantities, easy to conflate: genome-level "
+    "(spread over distinct 64-byte genomes), byte-level (spread over raw "
+    "byte values, matching the reference implementation's own metric), "
+    "and instruction-level (spread over decoded operations)."
+)
+analysis_cols = st.columns(2)
+with analysis_cols[0]:
+    fig_simpson = px.line(
+        history_df,
+        x="epoch",
+        y="simpson_diversity",
+        labels={"epoch": "Epoch", "simpson_diversity": "Simpson's diversity index"},
+        title="Genotype diversity",
+    )
+    fig_simpson.update_yaxes(range=[0, 1])
+    st.plotly_chart(fig_simpson, width="stretch")
+
+    fig_entropy = go.Figure()
+    fig_entropy.add_scatter(x=history_df["epoch"], y=history_df["genome_entropy_bits"], name="Genome-level")
+    fig_entropy.add_scatter(x=history_df["epoch"], y=history_df["byte_entropy_bits"], name="Byte-level")
+    fig_entropy.add_scatter(
+        x=history_df["epoch"], y=history_df["instruction_entropy_bits"], name="Instruction-level"
+    )
+    fig_entropy.update_layout(
+        title="Entropy at three levels", xaxis_title="Epoch", yaxis_title="Entropy (bits)"
+    )
+    st.plotly_chart(fig_entropy, width="stretch")
+
+with analysis_cols[1]:
+    fig_complexity = go.Figure()
+    fig_complexity.add_scatter(
+        x=history_df["epoch"], y=history_df["compressed_bits_per_byte"], name="Compressed bits/byte"
+    )
+    fig_complexity.add_scatter(
+        x=history_df["epoch"],
+        y=history_df["structural_redundancy_bits"],
+        name="Structural redundancy",
+    )
+    fig_complexity.update_layout(
+        title="Complexity proxies", xaxis_title="Epoch", yaxis_title="Bits"
+    )
+    st.plotly_chart(fig_complexity, width="stretch")
+    st.caption(
+        "Complexity *proxies*, not measurements of 'the complexity' of "
+        "anything (spec section 14). Structural redundancy is byte "
+        "entropy minus compressed bits/byte: a large positive gap "
+        "suggests repeated patterns (e.g. copied genomes) beyond what a "
+        "flat byte-frequency count alone would predict."
     )
 
 st.divider()
@@ -183,11 +262,12 @@ inspector_col, debugger_col = st.columns(2)
 
 with inspector_col:
     st.subheader("Genome inspector")
+    if "inspector_index" not in st.session_state:
+        st.session_state.inspector_index = 0
     organism_index = st.number_input(
         "Organism index",
         min_value=0,
         max_value=config.universe.population_size - 1,
-        value=0,
         step=1,
         key="inspector_index",
     )
@@ -216,11 +296,40 @@ with inspector_col:
         title="Instruction distribution (this genome)",
     )
     st.plotly_chart(fig_dist, width="stretch")
+
+    st.markdown("**Lineage**")
+    recorder: LineageRecorder | None = st.session_state.get("lineage_recorder")
+    if recorder is None:
+        st.caption("Lineage tracking is off -- enable it in the sidebar to see ancestry here.")
+    elif organism.organism_id not in recorder:
+        st.caption(
+            "This organism predates when lineage tracking was enabled, so its "
+            "ancestry wasn't recorded."
+        )
+    else:
+        lineage_cols = st.columns(2)
+        lineage_cols[0].metric("Recorded ancestors", len(recorder.ancestors(organism.organism_id)))
+        lineage_cols[1].metric(
+            "Recorded descendants", len(recorder.descendants(organism.organism_id))
+        )
+
+    st.markdown("**Replication check**")
     st.caption(
-        "Lineage and replication statistics are not shown here -- they "
-        "require the analysis modules planned for Phase 3 (spec section "
-        "13/15), not yet implemented."
+        "On demand only -- pairs this genome against 13 independent random "
+        "partners across 5 chained generations and checks how consistent "
+        "the output is (spec section 13; see analysis/replication.py)."
     )
+    if st.button("Compute replication score", key="compute_replication"):
+        score = replication_score(
+            organism.genome, seed=config.universe.seed, max_steps=config.universe.max_steps
+        )
+        st.session_state.replication_result = (organism.organism_id, score)
+    result = st.session_state.get("replication_result")
+    if result is not None and result[0] == organism.organism_id:
+        _, score = result
+        label = classify(score, config.universe.genome_length)
+        st.metric("Replication score", f"{score} / {config.universe.genome_length}")
+        st.caption(f"Classification: {label} (heuristic, not proof of self-replication).")
 
 with debugger_col:
     st.subheader("Execution debugger")
@@ -286,6 +395,55 @@ with debugger_col:
                 f"Current instruction: {state.current_instruction.name} | "
                 "blue = head0, red = head1, green = program counter."
             )
+
+st.divider()
+st.subheader("Scan for candidate replicators")
+st.caption(
+    "Runs the same replication-consistency check as the genome inspector "
+    "across a sample of the population. Expensive: each candidate costs "
+    "13 x 5 = 65 BFF executions, so this only scans a sample, not the "
+    "whole population."
+)
+scan_cols = st.columns(3)
+sample_size = scan_cols[0].number_input(
+    "Sample size", min_value=10, max_value=2000, value=200, step=10
+)
+scan_max_steps = scan_cols[1].number_input(
+    "Max steps per execution",
+    min_value=100,
+    max_value=config.universe.max_steps,
+    value=min(2000, config.universe.max_steps),
+    step=100,
+)
+if scan_cols[2].button("Run scan", width="stretch"):
+    sample_idx = select_display_sample(
+        config.universe.population_size, max_displayed=int(sample_size), seed=universe.epoch
+    )
+    candidates = universe.population[sample_idx]
+    scores = replication_scores(
+        candidates, seed=config.universe.seed ^ universe.epoch, max_steps=int(scan_max_steps)
+    )
+    order = np.argsort(-scores)[:20]
+    st.session_state.scan_results = pd.DataFrame(
+        {
+            "population_index": sample_idx[order],
+            "score": scores[order],
+            "classification": [
+                classify(int(s), config.universe.genome_length) for s in scores[order]
+            ],
+        }
+    )
+
+scan_results = st.session_state.get("scan_results")
+if scan_results is not None:
+    st.dataframe(scan_results, width="stretch", hide_index=True)
+    if scan_results["score"].max() == 0:
+        st.caption("No candidates in this sample showed any replication signal.")
+    else:
+        jump_target = int(scan_results.iloc[0]["population_index"])
+        if st.button(f"Load top result (index {jump_target}) into genome inspector"):
+            st.session_state.inspector_index = jump_target
+            st.rerun()
 
 if st.session_state.get("playing"):
     _step(int(epochs_per_step))
