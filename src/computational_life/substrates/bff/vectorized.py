@@ -8,22 +8,28 @@ component only: its semantics are validated against
 (the scalar oracle) via differential tests, and it must never be treated
 as a separate source of truth for BFF semantics.
 
-Bracket matching (``[`` / ``]``) is data-dependent per lane and is not
-elementwise-vectorizable in the same way as the other instructions; it is
-handled with a short Python loop restricted to the (typically small)
-subset of lanes that need a bracket scan on a given tick. This is a
-deliberate, documented performance compromise for Phase 1 -- see
-docs/bff_semantics.md and the Phase 1 plan's "performance pitfalls"
-section. Profile before attempting to vectorize it further.
+Bracket matching (``[`` / ``]``) is data-dependent per lane, which made it
+the initial Phase 1 implementation's dominant cost: cProfile on a
+population of 32,768 showed the naive per-lane Python bracket scan
+consuming ~60% of per-epoch time. It is vectorized here using the
+classic prefix-sum trick for matching brackets: scoring ``[`` as +1 and
+``]`` as -1 and taking a cumulative sum turns "find the matching bracket"
+into "find the nearest position (in the right direction) whose prefix
+sum equals a target value," which is a handful of elementwise NumPy ops
+over the whole batch rather than a per-lane scan loop. See
+docs/bff_semantics.md for the full derivation.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from .instruction_set import BYTE_TO_OP_TABLE, Op
+from .instruction_set import BYTE_TO_OP_TABLE, Op, encode
 
 DEFAULT_MAX_STEPS = 8192
+
+_LOOP_START_BYTE = encode(Op.LOOP_START)
+_LOOP_END_BYTE = encode(Op.LOOP_END)
 
 
 class BatchBffInterpreter:
@@ -137,6 +143,16 @@ class BatchBffInterpreter:
     def _resolve_loop_start(
         self, active: np.ndarray, op: np.ndarray, next_pc: np.ndarray
     ) -> np.ndarray:
+        """Vectorized ``[``: skip forward to just past the matching ``]``
+        for every lane where tape[head0] is NULL.
+
+        For a lane whose ``[`` sits at position ``p``, define
+        ``signed(k) = +1`` if tape[k] is ``[``, ``-1`` if ``]``, else 0, and
+        ``depth = cumsum(signed)`` (inclusive). Since depth(p) already
+        counts the ``[`` at p itself, the matching ``]`` is the first
+        position q > p with depth(q) == depth(p) - 1 (the local nesting
+        level returns to what it was just before the ``[``).
+        """
         n = self.length
         rows = np.arange(self.num_lanes)
         mask = active & (op == int(Op.LOOP_START))
@@ -144,15 +160,35 @@ class BatchBffInterpreter:
             return next_pc
         h0 = self.head0[mask] % n
         is_null = self.tapes[rows[mask], h0] == 0
-        skip_lanes = rows[mask][is_null]
-        for lane in skip_lanes:
-            match = self._scan_forward(lane, int(self.pc[lane]))
-            next_pc[lane] = (match + 1) if match is not None else n
+        skip_rows = rows[mask][is_null]
+        if skip_rows.size == 0:
+            return next_pc
+
+        p = self.pc[skip_rows]
+        tape_sub = self.tapes[skip_rows]
+        signed = (tape_sub == _LOOP_START_BYTE).astype(np.int32) - (
+            tape_sub == _LOOP_END_BYTE
+        ).astype(np.int32)
+        depth = np.cumsum(signed, axis=1)
+
+        k = np.arange(n)
+        target = depth[np.arange(len(skip_rows)), p] - 1
+        candidate = (depth == target[:, None]) & (k[None, :] > p[:, None])
+        # Smallest matching column, using n (out of range) as "not found".
+        first_match = np.where(candidate, k[None, :], n).min(axis=1)
+        next_pc[skip_rows] = np.where(first_match < n, first_match + 1, n)
         return next_pc
 
     def _resolve_loop_end(
         self, active: np.ndarray, op: np.ndarray, next_pc: np.ndarray
     ) -> np.ndarray:
+        """Vectorized ``]``: jump back to just past the matching ``[`` for
+        every lane where tape[head0] is non-NULL.
+
+        Mirrors :meth:`_resolve_loop_start` using a suffix sum instead of a
+        prefix sum: for a ``]`` at position p, the matching ``[`` is the
+        nearest position q < p with suffix_sum(q) == suffix_sum(p) + 1.
+        """
         n = self.length
         rows = np.arange(self.num_lanes)
         mask = active & (op == int(Op.LOOP_END))
@@ -160,39 +196,21 @@ class BatchBffInterpreter:
             return next_pc
         h0 = self.head0[mask] % n
         is_nonnull = self.tapes[rows[mask], h0] != 0
-        jump_lanes = rows[mask][is_nonnull]
-        for lane in jump_lanes:
-            match = self._scan_backward(lane, int(self.pc[lane]))
-            next_pc[lane] = (match + 1) if match is not None else -1
+        jump_rows = rows[mask][is_nonnull]
+        if jump_rows.size == 0:
+            return next_pc
+
+        p = self.pc[jump_rows]
+        tape_sub = self.tapes[jump_rows]
+        signed = (tape_sub == _LOOP_START_BYTE).astype(np.int32) - (
+            tape_sub == _LOOP_END_BYTE
+        ).astype(np.int32)
+        suffix = signed[:, ::-1].cumsum(axis=1)[:, ::-1]
+
+        k = np.arange(n)
+        target = suffix[np.arange(len(jump_rows)), p] + 1
+        candidate = (suffix == target[:, None]) & (k[None, :] < p[:, None])
+        # Largest matching column, using -1 as "not found".
+        last_match = np.where(candidate, k[None, :], -1).max(axis=1)
+        next_pc[jump_rows] = np.where(last_match >= 0, last_match + 1, -1)
         return next_pc
-
-    def _scan_forward(self, lane: int, loop_start_pc: int) -> int | None:
-        tape = self.tapes[lane]
-        n = self.length
-        depth = 1
-        pc = loop_start_pc + 1
-        while pc < n:
-            byte_op = BYTE_TO_OP_TABLE[tape[pc]]
-            if byte_op == int(Op.LOOP_END):
-                depth -= 1
-                if depth == 0:
-                    return pc
-            elif byte_op == int(Op.LOOP_START):
-                depth += 1
-            pc += 1
-        return None
-
-    def _scan_backward(self, lane: int, loop_end_pc: int) -> int | None:
-        tape = self.tapes[lane]
-        depth = 1
-        pc = loop_end_pc - 1
-        while pc >= 0:
-            byte_op = BYTE_TO_OP_TABLE[tape[pc]]
-            if byte_op == int(Op.LOOP_START):
-                depth -= 1
-                if depth == 0:
-                    return pc
-            elif byte_op == int(Op.LOOP_END):
-                depth += 1
-            pc -= 1
-        return None

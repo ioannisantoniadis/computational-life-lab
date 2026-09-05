@@ -62,6 +62,30 @@ def test_batch_matches_scalar_on_handwritten_edge_cases():
         assert int(batch.step_count[lane]) == expected.step_count
 
 
+def test_batch_matches_scalar_under_bracket_heavy_stress():
+    # Biases the tape toward '[' / ']' so many lanes hit loop resolution
+    # (forward and backward) concurrently on the same tick -- the case the
+    # vectorized prefix-sum bracket matching most needs to get right.
+    rng = np.random.default_rng(2024)
+    num_lanes = 500
+    length = 32
+    tapes = rng.integers(0, 256, size=(num_lanes, length), dtype=np.uint8)
+    bracket_bias = rng.random((num_lanes, length)) < 0.3
+    brackets = rng.choice([ord("["), ord("]")], size=(num_lanes, length))
+    tapes = np.where(bracket_bias, brackets, tapes).astype(np.uint8)
+
+    batch = BatchBffInterpreter(tapes.copy())
+    batch.run(max_steps=3000)
+
+    for lane in range(num_lanes):
+        expected = run_scalar(tapes[lane].tobytes(), max_steps=3000, head_init="zero")
+        assert bytes(batch.tapes[lane]) == expected.tape, f"tape mismatch at lane {lane}"
+        assert int(batch.head0[lane]) == expected.head0
+        assert int(batch.head1[lane]) == expected.head1
+        assert bool(batch.halted[lane]) == expected.halted
+        assert int(batch.step_count[lane]) == expected.step_count
+
+
 def test_batch_reset_restores_initial_state():
     rng = np.random.default_rng(7)
     tapes = rng.integers(0, 256, size=(5, 32), dtype=np.uint8)
