@@ -142,7 +142,10 @@ not about cross-implementation bit-matching.
 
 - The reference's built-in replicator heuristic (`CheckSelfRep`: run a
   candidate genome against several independent noise partners across a
-  few generations and check for consistency) is useful context for
-  Phase 3's replication-detection analysis module, but is deliberately
-  **not** implemented here — Phase 1 must not embed any replication
-  classification into the simulator itself (spec section 3.1/13).
+  few generations and check for consistency) was deliberately **not**
+  implemented in Phase 1 — Phase 1 must not embed any replication
+  classification into the simulator itself (spec section 3.1/13). It is
+  now implemented, faithfully adapted from the same reference algorithm,
+  as an analysis-layer module: `analysis/replication.py`. It is never
+  called from `substrates/bff/universe.py` — only from the analysis layer
+  and the UI, on demand.
