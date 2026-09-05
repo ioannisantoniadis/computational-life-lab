@@ -55,6 +55,31 @@ life run experiments/configs/bff_dev.yaml --epochs 20 --seed 1  # always identic
 life run experiments/configs/bff_dev.yaml --epochs 20 --seed 1
 ```
 
+## Run outputs (databases, checkpoints)
+
+`life run --db ...`, `life sweep --db ...`, and `--save-checkpoint` /
+`--checkpoint-dir` write SQLite databases and `.npz` checkpoint files.
+These are regenerable data, not source, so they're gitignored — the
+convention is to keep them locally under `runs/` (created on demand,
+never committed):
+
+```bash
+life sweep experiments/configs/bff_population_sweep.yaml --db runs/population_sweep.db
+life sweep-report --db runs/population_sweep.db --experiment population_size_sweep \
+    --group-by population.size --genome-length 64
+
+life run experiments/configs/bff_dev.yaml --db runs/dev.db \
+    --checkpoint-dir runs/checkpoints --checkpoint-interval 1000
+life analyze 1 --db runs/dev.db
+```
+
+Every run gets a stable integer id and full metadata (config text, seed,
+software version, status, a per-epoch metrics history, and an event log)
+in the `runs`/`metrics`/`events` tables -- see
+[`storage/database.py`](src/computational_life/storage/database.py).
+Query them with `life analyze` / `life sweep-report`, or open the
+`.db` file directly (it's plain SQLite) for anything more ad hoc.
+
 ## Running the tests
 
 ```bash

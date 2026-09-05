@@ -7,3 +7,7 @@ dist/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Run outputs (SQLite databases, checkpoints, logs): regenerable data,
+# not source. Kept locally under runs/, never committed. See README.md.
+runs/
