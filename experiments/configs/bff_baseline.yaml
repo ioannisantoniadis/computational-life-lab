@@ -1,0 +1,25 @@
+# Canonical BFF primordial-soup baseline (spec section 20 / experiment 002).
+# No mutation, no fitness, no selection: replication (if it emerges) must
+# come from BFF execution and random pairing alone.
+experiment: bff_soup
+name: bff_baseline
+seed: 12345
+
+population:
+  size: 131072
+  genome_length: 64
+
+execution:
+  max_steps: 8192
+  head_init: zero # "bff_noheads" reference variant; see docs/bff_semantics.md
+
+interaction:
+  strategy: random_pairing # the only strategy implemented in Phase 1
+
+mutation:
+  enabled: false
+  rate: 0.0
+
+run:
+  epochs: 20000
+  report_interval: 100

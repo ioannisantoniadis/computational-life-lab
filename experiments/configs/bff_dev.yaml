@@ -1,0 +1,24 @@
+# Small, fast configuration for local sanity checks and CI smoke tests.
+# Not scientifically meaningful on its own -- use bff_baseline.yaml for that.
+experiment: bff_soup
+name: bff_dev
+seed: 12345
+
+population:
+  size: 512
+  genome_length: 64
+
+execution:
+  max_steps: 8192
+  head_init: zero
+
+interaction:
+  strategy: random_pairing
+
+mutation:
+  enabled: false
+  rate: 0.0
+
+run:
+  epochs: 200
+  report_interval: 20
