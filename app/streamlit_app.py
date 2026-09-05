@@ -28,13 +28,16 @@ from rendering import (
 
 from computational_life.analysis.lineage import LineageRecorder
 from computational_life.analysis.replication import classify, replication_score, replication_scores
-from computational_life.experiments.base import load_bff_soup_config
+from computational_life.experiments.base import BffSoupExperimentConfig, load_bff_soup_config
 from computational_life.experiments.bff_soup import compute_metrics
+from computational_life.storage.checkpoints import load_checkpoint
+from computational_life.storage.database import RunStore
 from computational_life.substrates.bff.interpreter import BffInterpreter
 from computational_life.substrates.bff.universe import BffSoupUniverse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIGS_DIR = REPO_ROOT / "experiments" / "configs"
+RUNS_DIR = REPO_ROOT / "runs"
 
 st.set_page_config(page_title="Computational Life Lab", layout="wide")
 
@@ -56,12 +59,57 @@ def _init_universe(config_name: str, seed_override: int | None) -> None:
     st.session_state.history = [compute_metrics(st.session_state.universe)]
     st.session_state.playing = False
     st.session_state.scan_results = None
+    st.session_state.loaded_run_info = None
+    st.session_state.inspector_index = 0
     if st.session_state.get("track_lineage"):
         recorder = LineageRecorder()
         recorder.record(st.session_state.universe)
         st.session_state.lineage_recorder = recorder
     else:
         st.session_state.lineage_recorder = None
+
+
+def _load_stored_run(db_path: Path, run_id: int) -> None:
+    """Load a previously saved run's full metrics history and, if it has
+    one, its latest checkpoint -- so a run started via `life run`/`life
+    sweep` hours or days ago can be inspected and continued here, not
+    just read back as text (spec section 26's "compare historical runs").
+    """
+    with RunStore(db_path) as store:
+        run = store.get_run(run_id)
+        events = store.get_events(run_id)
+        history = store.get_metrics_history(run_id)
+
+    checkpoint_events = [e for e in events if e["kind"] == "checkpoint_saved"]
+    if not checkpoint_events:
+        raise LookupError(
+            f"Run {run_id} ({run['experiment_name']}) has no saved checkpoint -- only its "
+            "metrics history can be shown, not its population. Re-run with --checkpoint-dir "
+            "or --save-checkpoint to make it fully loadable here."
+        )
+    latest = max(checkpoint_events, key=lambda e: e["epoch"])
+    universe = load_checkpoint(latest["payload"]["path"])
+
+    st.session_state.universe = universe
+    st.session_state.config = BffSoupExperimentConfig(
+        name=run["experiment_name"],
+        seed=universe.config.seed,
+        universe=universe.config,
+        epochs=0,
+        report_interval=1,
+    )
+    st.session_state.history = history if history else [compute_metrics(universe)]
+    st.session_state.playing = False
+    st.session_state.scan_results = None
+    st.session_state.lineage_recorder = None
+    st.session_state.inspector_index = 0
+    st.session_state.loaded_run_info = {
+        "db_path": str(db_path),
+        "run_id": run_id,
+        "experiment_name": run["experiment_name"],
+        "checkpoint_epoch": latest["epoch"],
+        "checkpoint_path": latest["payload"]["path"],
+    }
 
 
 def _step(num_epochs: int) -> None:
@@ -94,6 +142,38 @@ with st.sidebar:
 
     if "universe" not in st.session_state:
         _init_universe(config_name, seed_override)
+
+    st.divider()
+    st.header("Load stored run")
+    st.caption(
+        "Open a run saved via `life run --db ...` or `life sweep --db ...` -- "
+        "including one that ran for hours -- and continue it from its last "
+        "checkpoint."
+    )
+    discovered_dbs = sorted(str(p.relative_to(REPO_ROOT)) for p in RUNS_DIR.glob("*.db")) if RUNS_DIR.is_dir() else []
+    db_path_text = st.text_input(
+        "Database path", value=discovered_dbs[0] if discovered_dbs else "", key="load_db_path"
+    )
+    db_path = Path(db_path_text) if db_path_text.strip() else None
+    if db_path is not None and db_path.is_file():
+        with RunStore(db_path) as browse_store:
+            stored_runs = browse_store.list_runs()
+        if not stored_runs:
+            st.caption("This database has no runs.")
+        else:
+            run_labels = {
+                f"#{r['id']} {r['experiment_name']} (seed={r['seed']}, "
+                f"epoch={r['final_epoch']}, {r['status']})": r["id"]
+                for r in stored_runs
+            }
+            selected_label = st.selectbox("Run", list(run_labels.keys()), key="load_run_label")
+            if st.button("Load this run", width="stretch"):
+                try:
+                    _load_stored_run(db_path, run_labels[selected_label])
+                except (LookupError, FileNotFoundError) as exc:
+                    st.error(str(exc))
+    elif db_path is not None:
+        st.caption("No database found at that path.")
 
     st.divider()
     st.header("Time controls")
@@ -129,6 +209,15 @@ with st.sidebar:
 
 universe: BffSoupUniverse = st.session_state.universe
 config = st.session_state.config
+
+loaded_run_info = st.session_state.get("loaded_run_info")
+if loaded_run_info:
+    st.info(
+        f"Viewing run #{loaded_run_info['run_id']} ({loaded_run_info['experiment_name']}) "
+        f"from `{loaded_run_info['db_path']}`, resumed from its checkpoint at epoch "
+        f"{loaded_run_info['checkpoint_epoch']}. Stepping/playing from here continues "
+        "this run forward; it does not modify the saved files."
+    )
 
 status_cols = st.columns(4)
 status_cols[0].metric("Epoch", universe.epoch)

@@ -133,6 +133,107 @@ def test_replicator_scan_runs_and_shows_results():
     assert len(at.dataframe) == 1
 
 
+def _create_stored_run_with_checkpoint(tmp_path) -> tuple[Path, int]:
+    """Runs the real CLI to produce a genuine --db + --checkpoint-dir run,
+    the same way a long overnight run would -- rather than hand-building
+    fixtures that might not match what the CLI actually produces.
+    """
+    from computational_life.cli import main
+
+    config_path = tmp_path / "fast.yaml"
+    config_path.write_text(
+        "experiment: bff_soup\n"
+        "name: loadable_test\n"
+        "seed: 9\n"
+        "population:\n  size: 16\n  genome_length: 8\n"
+        "execution:\n  max_steps: 100\n"
+        "run:\n  epochs: 6\n  report_interval: 2\n"
+    )
+    db_path = tmp_path / "loadable.db"
+    checkpoint_dir = tmp_path / "checkpoints"
+    main(
+        [
+            "run",
+            str(config_path),
+            "--db",
+            str(db_path),
+            "--checkpoint-dir",
+            str(checkpoint_dir),
+            "--checkpoint-interval",
+            "2",
+        ]
+    )
+    return db_path, 1  # first run in a fresh database always gets id 1
+
+
+def test_load_stored_run_restores_population_and_history(tmp_path, capsys):
+    db_path, run_id = _create_stored_run_with_checkpoint(tmp_path)
+    capsys.readouterr()
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+
+    at.text_input(key="load_db_path").set_value(str(db_path)).run(timeout=30)
+    assert not at.exception
+
+    run_select = at.selectbox(key="load_run_label")
+    assert f"#{run_id}" in run_select.options[0]
+    run_select.select(run_select.options[0]).run(timeout=30)
+
+    next(b for b in at.button if b.label == "Load this run").click().run(timeout=30)
+    assert not at.exception
+
+    # The run finished at epoch 6, with its last checkpoint also at epoch 6.
+    epoch_metric = at.metric[0]
+    assert epoch_metric.value == "6"
+    assert any("Viewing run #1" in info.value for info in at.info)
+
+
+def test_load_stored_run_can_be_resumed_by_stepping(tmp_path, capsys):
+    db_path, run_id = _create_stored_run_with_checkpoint(tmp_path)
+    capsys.readouterr()
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+    at.text_input(key="load_db_path").set_value(str(db_path)).run(timeout=30)
+    run_select = at.selectbox(key="load_run_label")
+    run_select.select(run_select.options[0]).run(timeout=30)
+    next(b for b in at.button if b.label == "Load this run").click().run(timeout=30)
+
+    next(ni for ni in at.number_input if ni.label == "Epochs per step").set_value(3).run(
+        timeout=30
+    )
+    next(b for b in at.button if b.label == "Step").click().run(timeout=30)
+    assert not at.exception
+
+    epoch_metric = at.metric[0]
+    assert epoch_metric.value == "9"  # 6 (loaded) + 3 more
+
+
+def test_load_stored_run_without_checkpoint_shows_error(tmp_path):
+    from computational_life.cli import main
+
+    config_path = tmp_path / "fast.yaml"
+    config_path.write_text(
+        "experiment: bff_soup\nname: no_checkpoint\nseed: 1\n"
+        "population:\n  size: 8\n  genome_length: 8\n"
+        "execution:\n  max_steps: 50\n"
+        "run:\n  epochs: 2\n"
+    )
+    db_path = tmp_path / "no_checkpoint.db"
+    main(["run", str(config_path), "--db", str(db_path)])  # no --checkpoint-dir
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+    at.text_input(key="load_db_path").set_value(str(db_path)).run(timeout=30)
+    run_select = at.selectbox(key="load_run_label")
+    run_select.select(run_select.options[0]).run(timeout=30)
+    next(b for b in at.button if b.label == "Load this run").click().run(timeout=30)
+
+    assert not at.exception
+    assert any("no saved checkpoint" in e.value for e in at.error)
+
+
 def test_reset_reinitializes_deterministically():
     at = AppTest.from_file(str(APP_PATH))
     at.run(timeout=30)

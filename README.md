@@ -29,11 +29,21 @@ to discover (see `computational-life-lab-spec.md`).
 
 ## Status
 
-**Phase 1 (core + BFF, headless)** is implemented: a deterministic,
-tested, UI-independent BFF interpreter and soup experiment, runnable
-from the CLI. Visualization, replication detection, lineage tracking,
-and persistence are later phases (see `computational-life-lab-spec.md`
-section 31) and are not yet built.
+Phases 1-4 of `computational-life-lab-spec.md` section 31 are
+implemented: a deterministic, tested, UI-independent BFF engine (CLI +
+Streamlit dashboard), an analysis layer (diversity, entropy, complexity
+proxies, replication detection, lineage tracking), and reproducibility
+infrastructure (SQLite run storage, checkpointing, parameter sweeps --
+including loading a stored run's history and population back into the
+dashboard and continuing it from its last checkpoint).
+
+Not yet built: a lineage-tree visualization and population coloring by
+lineage (ancestry data exists and is queryable, but not drawn as a
+tree), automatic "candidate replicator detected" event flagging during
+a live run (detection exists but is on-demand/end-of-run only), a UI
+page for comparing multiple stored runs side by side, and Phase 5
+(generic substrates beyond BFF) -- deliberately deferred until the BFF
+system has been pushed further.
 
 ## Running the baseline experiment
 
@@ -79,6 +89,13 @@ in the `runs`/`metrics`/`events` tables -- see
 [`storage/database.py`](src/computational_life/storage/database.py).
 Query them with `life analyze` / `life sweep-report`, or open the
 `.db` file directly (it's plain SQLite) for anything more ad hoc.
+
+The Streamlit dashboard's "Load stored run" sidebar section opens any
+`--db` database, lists its runs, and -- if a run has a saved checkpoint
+-- restores its full population and metrics history so it can be
+inspected visually and continued (Step/Play) from exactly where it left
+off. This is how you check on a run that took hours to finish without
+waiting for it live.
 
 ## Running the tests
 
