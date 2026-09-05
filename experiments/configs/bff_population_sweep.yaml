@@ -1,0 +1,29 @@
+# Spec experiment 004: population-size sweep.
+# Answers "how does population size affect emergence probability?" --
+# with an honest sample size, not a single anecdote. Kept small/fast here
+# (bump population sizes, epochs, and seed count for a real sweep).
+experiment: bff_soup_sweep
+name: population_size_sweep
+
+base:
+  population:
+    genome_length: 64
+  execution:
+    max_steps: 4096
+    head_init: zero
+  mutation:
+    enabled: false
+    rate: 0.0
+  run:
+    epochs: 500
+    report_interval: 100
+
+sweep:
+  population.size:
+    - 256
+    - 1024
+    - 4096
+
+seeds:
+  count: 5
+  start: 0

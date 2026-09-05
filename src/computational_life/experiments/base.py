@@ -26,14 +26,15 @@ class BffSoupExperimentConfig:
     report_interval: int
 
 
-def load_bff_soup_config(path: str | Path) -> BffSoupExperimentConfig:
-    with open(path) as f:
-        raw = yaml.safe_load(f)
+def parse_bff_soup_config(raw: dict) -> BffSoupExperimentConfig:
+    """Turn an already-loaded raw config dict into a typed config.
 
+    Shared by :func:`load_bff_soup_config` (one YAML file, one run) and
+    ``experiments.sweep`` (one base dict, many per-point overrides) so
+    both go through identical parsing/defaulting logic.
+    """
     if raw.get("experiment") != "bff_soup":
-        raise ValueError(
-            f"Expected experiment: bff_soup in {path}, got {raw.get('experiment')!r}"
-        )
+        raise ValueError(f"Expected experiment: bff_soup, got {raw.get('experiment')!r}")
 
     seed = int(raw["seed"])
     population = raw.get("population", {})
@@ -58,3 +59,12 @@ def load_bff_soup_config(path: str | Path) -> BffSoupExperimentConfig:
         epochs=int(run.get("epochs", 1000)),
         report_interval=int(run.get("report_interval", 100)),
     )
+
+
+def load_bff_soup_config(path: str | Path) -> BffSoupExperimentConfig:
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    try:
+        return parse_bff_soup_config(raw)
+    except ValueError as exc:
+        raise ValueError(f"{exc} (in {path})") from exc

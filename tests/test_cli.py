@@ -144,3 +144,83 @@ def test_cli_periodic_checkpoints_are_written_at_configured_interval(tmp_path, c
 
     saved = sorted(p.name for p in checkpoint_dir.glob("*.npz"))
     assert saved == ["epoch_0000000002.npz", "epoch_0000000004.npz", "epoch_0000000006.npz"]
+
+
+def _write_fast_sweep_config(path: Path) -> Path:
+    config_path = path / "fast_sweep.yaml"
+    config_path.write_text(
+        "experiment: bff_soup_sweep\n"
+        "name: fast_sweep\n"
+        "base:\n"
+        "  population: {genome_length: 8}\n"
+        "  execution: {max_steps: 100}\n"
+        "  run: {epochs: 3, report_interval: 3}\n"
+        "sweep:\n"
+        "  population.size: [16, 32]\n"
+        "seeds:\n  count: 2\n"
+    )
+    return config_path
+
+
+def test_cli_sweep_persists_all_points(tmp_path, capsys):
+    from computational_life.storage.database import RunStore
+
+    config_path = _write_fast_sweep_config(tmp_path)
+    db_path = tmp_path / "sweep.db"
+    exit_code = main(["sweep", str(config_path), "--db", str(db_path)])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "4 points" in out  # 2 population sizes x 2 seeds
+    assert "Sweep complete: 4 runs saved" in out
+
+    with RunStore(db_path) as store:
+        runs = store.list_runs()
+        assert len(runs) == 4
+        assert all(r["status"] == "completed" for r in runs)
+
+
+def test_cli_sweep_report_summarizes_by_parameter(tmp_path, capsys):
+    config_path = _write_fast_sweep_config(tmp_path)
+    db_path = tmp_path / "sweep.db"
+    main(["sweep", str(config_path), "--db", str(db_path)])
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "sweep-report",
+            "--db",
+            str(db_path),
+            "--experiment",
+            "fast_sweep",
+            "--group-by",
+            "population.size",
+            "--genome-length",
+            "8",
+        ]
+    )
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "population.size=16" in out
+    assert "population.size=32" in out
+    assert "/2 runs" in out  # 2 seeds per population size
+    assert "too few" in out  # only 4 total runs
+
+
+def test_cli_sweep_report_missing_experiment_returns_error(tmp_path, capsys):
+    config_path = _write_fast_sweep_config(tmp_path)
+    db_path = tmp_path / "sweep.db"
+    main(["sweep", str(config_path), "--db", str(db_path)])
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "sweep-report",
+            "--db",
+            str(db_path),
+            "--experiment",
+            "does_not_exist",
+            "--group-by",
+            "population.size",
+        ]
+    )
+    assert exit_code == 1

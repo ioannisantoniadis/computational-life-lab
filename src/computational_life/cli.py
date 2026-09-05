@@ -133,6 +133,58 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_sweep(args: argparse.Namespace) -> int:
+    from .experiments.sweep import load_sweep_config, run_sweep
+    from .storage.database import RunStore
+
+    sweep_config = load_sweep_config(args.config)
+    points = sweep_config.points()
+    print(f"Sweep '{sweep_config.name}': {len(points)} points "
+          f"({len(sweep_config.seeds)} seeds each)")
+
+    def on_point_done(point, run_id, universe, best_score) -> None:
+        genome_length = point.config.universe.genome_length
+        overrides = {k: v for k, v in point.overrides.items() if k != "seed"}
+        print(
+            f"  run {run_id:>4}  {overrides}  seed={point.overrides['seed']}  "
+            f"epoch={universe.epoch}  best_replication_score={best_score}/{genome_length}"
+        )
+
+    with RunStore(args.db) as store:
+        run_ids = run_sweep(sweep_config, store, on_point_done=on_point_done)
+
+    print(f"Sweep complete: {len(run_ids)} runs saved to {args.db}")
+    return 0
+
+
+def _cmd_sweep_report(args: argparse.Namespace) -> int:
+    from .experiments.sweep import collect_sweep_results, summarize_by_parameter
+    from .storage.database import RunStore
+
+    with RunStore(args.db) as store:
+        results = collect_sweep_results(store, args.experiment)
+
+    if not results:
+        print(f"No sweep results found for experiment '{args.experiment}' in {args.db}")
+        return 1
+
+    summary = summarize_by_parameter(results, args.group_by, genome_length=args.genome_length)
+    print(f"P(candidate replicator | {args.group_by}), genome_length={args.genome_length}:")
+    for row in summary:
+        print(
+            f"  {args.group_by}={row[args.group_by]!r}: "
+            f"{row['n_with_candidate_replicator']}/{row['n_runs']} runs "
+            f"(p={row['p_candidate_replicator']:.2f})"
+        )
+    total_runs = sum(row["n_runs"] for row in summary)
+    if total_runs < 10:
+        print(
+            f"Note: only {total_runs} total runs -- too few to draw statistical "
+            "conclusions from (spec section 22)."
+        )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="life", description="Computational Life Lab CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -165,6 +217,34 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("run_id", type=int, help="Run id to summarize")
     analyze_parser.add_argument("--db", required=True, help="SQLite database path to read from")
     analyze_parser.set_defaults(func=_cmd_analyze)
+
+    sweep_parser = subparsers.add_parser(
+        "sweep", help="Run a parameter sweep (many population/mutation/seed combinations)"
+    )
+    sweep_parser.add_argument("config", help="Path to a bff_soup_sweep YAML configuration file")
+    sweep_parser.add_argument(
+        "--db", required=True, help="SQLite database path to persist every sweep run to"
+    )
+    sweep_parser.set_defaults(func=_cmd_sweep)
+
+    sweep_report_parser = subparsers.add_parser(
+        "sweep-report", help="Summarize P(candidate replicator | parameter) from a stored sweep"
+    )
+    sweep_report_parser.add_argument("--db", required=True, help="SQLite database path to read from")
+    sweep_report_parser.add_argument(
+        "--experiment", required=True, help="Sweep name (matches the sweep config's `name:`)"
+    )
+    sweep_report_parser.add_argument(
+        "--group-by", required=True, help="Swept parameter key to group by, e.g. population.size"
+    )
+    sweep_report_parser.add_argument(
+        "--genome-length",
+        type=int,
+        default=64,
+        help="Genome length used to normalize replication scores (must be constant across the "
+        "sweep for this report to be meaningful)",
+    )
+    sweep_report_parser.set_defaults(func=_cmd_sweep_report)
 
     return parser
 
