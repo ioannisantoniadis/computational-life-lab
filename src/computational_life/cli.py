@@ -13,6 +13,10 @@ from .experiments.bff_soup import run_bff_soup
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    if args.resume_from and args.seed is not None:
+        print("--seed has no effect with --resume-from (the checkpoint's RNG state is used)")
+        return 1
+
     config = load_bff_soup_config(args.config)
 
     overrides = {}
@@ -23,10 +27,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if overrides:
         import dataclasses
 
-        universe = config.universe
+        universe_config = config.universe
         if "seed" in overrides:
-            universe = dataclasses.replace(universe, seed=overrides.pop("seed"))
-        config = dataclasses.replace(config, universe=universe, **overrides)
+            universe_config = dataclasses.replace(universe_config, seed=overrides.pop("seed"))
+        config = dataclasses.replace(config, universe=universe_config, **overrides)
+
+    resumed_universe = None
+    if args.resume_from:
+        from .storage.checkpoints import load_checkpoint
+
+        resumed_universe = load_checkpoint(args.resume_from)
+        print(f"Resumed from checkpoint at epoch {resumed_universe.epoch}")
+
+    run_seed = resumed_universe.config.seed if resumed_universe is not None else config.universe.seed
 
     store = None
     run_id = None
@@ -39,7 +52,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         run_id = store.start_run(
             experiment_name=config.name,
             config_text=Path(args.config).read_text(),
-            seed=config.universe.seed,
+            seed=run_seed,
         )
 
     def report(metrics: dict) -> None:
@@ -51,13 +64,39 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if store is not None:
             store.record_metrics(run_id, metrics["epoch"], metrics)
 
+    on_checkpoint = None
+    if args.checkpoint_dir:
+        from pathlib import Path
+
+        from .storage.checkpoints import save_checkpoint
+
+        checkpoint_dir = Path(args.checkpoint_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        def on_checkpoint(universe) -> None:
+            checkpoint_path = checkpoint_dir / f"epoch_{universe.epoch:010d}"
+            save_checkpoint(universe, checkpoint_path)
+            print(f"Checkpoint saved: {checkpoint_path}.npz")
+
     try:
-        universe = run_bff_soup(config, on_report=report)
+        universe = run_bff_soup(
+            config,
+            on_report=report,
+            universe=resumed_universe,
+            on_checkpoint=on_checkpoint,
+            checkpoint_interval=args.checkpoint_interval,
+        )
     except BaseException:
         if store is not None:
             store.finish_run(run_id, final_epoch=0, status="failed")
             store.close()
         raise
+
+    if args.save_checkpoint:
+        from .storage.checkpoints import save_checkpoint
+
+        save_checkpoint(universe, args.save_checkpoint)
+        print(f"Final checkpoint saved to {args.save_checkpoint}")
 
     if store is not None:
         store.finish_run(run_id, final_epoch=universe.epoch)
@@ -104,6 +143,21 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--seed", type=int, default=None, help="Override seed from config")
     run_parser.add_argument(
         "--db", default=None, help="SQLite database path to persist this run's metrics to"
+    )
+    run_parser.add_argument(
+        "--resume-from", default=None, help="Resume from a checkpoint instead of a fresh population"
+    )
+    run_parser.add_argument(
+        "--save-checkpoint", default=None, help="Save a checkpoint of the final state to this path"
+    )
+    run_parser.add_argument(
+        "--checkpoint-dir", default=None, help="Directory to save periodic checkpoints into"
+    )
+    run_parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=1000,
+        help="Epochs between periodic checkpoints (only used with --checkpoint-dir)",
     )
     run_parser.set_defaults(func=_cmd_run)
 

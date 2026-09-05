@@ -61,6 +61,41 @@ class BffSoupUniverse:
 
         self._initialize_population()
 
+    @classmethod
+    def from_state(
+        cls,
+        config: BffSoupConfig,
+        *,
+        population: np.ndarray,
+        organism_id: np.ndarray,
+        generation: np.ndarray,
+        birth_epoch: np.ndarray,
+        parent_ids: np.ndarray,
+        next_organism_id: int,
+        epoch: int,
+        rng_state: dict,
+    ) -> BffSoupUniverse:
+        """Reconstruct a universe from previously saved state.
+
+        Used by storage.checkpoints.load_checkpoint to restore a run
+        without re-randomizing the population. Restoring the exact RNG
+        substream state (not just re-seeding) is what makes the resumed
+        run's subsequent trajectory identical to an uninterrupted one
+        (spec section 24).
+        """
+        universe = cls.__new__(cls)
+        universe.config = config
+        universe.rng = RngStreams(config.seed)
+        universe.rng.restore(rng_state)
+        universe.population = population
+        universe.organism_id = organism_id
+        universe.generation = generation
+        universe.birth_epoch = birth_epoch
+        universe.parent_ids = parent_ids
+        universe._next_organism_id = next_organism_id
+        universe.epoch = epoch
+        return universe
+
     def _initialize_population(self) -> None:
         n, length = self.config.population_size, self.config.genome_length
         init_rng = self.rng.stream("init")

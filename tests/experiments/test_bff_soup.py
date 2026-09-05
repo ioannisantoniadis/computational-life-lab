@@ -58,3 +58,38 @@ def test_compute_metrics_tracks_epoch_progress():
     universe.step_epoch()
     universe.step_epoch()
     assert compute_metrics(universe)["epoch"] == 2
+
+
+def test_run_bff_soup_accepts_a_pre_built_universe_and_continues_it():
+    starting_universe = BffSoupUniverse(
+        BffSoupConfig(population_size=32, genome_length=16, max_steps=200, seed=3)
+    )
+    starting_universe.step_epoch()
+    starting_universe.step_epoch()
+
+    config = make_config(epochs=3)
+    result = run_bff_soup(config, universe=starting_universe)
+
+    assert result is starting_universe
+    assert result.epoch == 5  # 2 already done + 3 more
+
+
+def test_run_bff_soup_invokes_on_checkpoint_at_configured_interval():
+    # The callback receives the live universe (not a copy), so record the
+    # epoch *at call time* -- capturing the object for later inspection
+    # would just see its final epoch for every entry.
+    config = make_config(epochs=10, report_interval=100)
+    checkpoint_epochs = []
+    run_bff_soup(
+        config,
+        on_checkpoint=lambda u: checkpoint_epochs.append(u.epoch),
+        checkpoint_interval=4,
+    )
+    assert checkpoint_epochs == [4, 8]
+
+
+def test_run_bff_soup_does_not_checkpoint_without_an_interval():
+    config = make_config(epochs=10)
+    checkpoints = []
+    run_bff_soup(config, on_checkpoint=checkpoints.append, checkpoint_interval=None)
+    assert checkpoints == []

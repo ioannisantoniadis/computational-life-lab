@@ -76,3 +76,71 @@ def test_cli_analyze_prints_run_summary(tmp_path, capsys):
     assert "bff_dev" in out
     assert "status: completed" in out
     assert "unique_genomes" in out
+
+
+def _write_fast_config(path: Path) -> Path:
+    # A small/fast config for checkpoint tests, which otherwise don't need
+    # bff_dev.yaml's population-512 scale.
+    config_path = path / "fast.yaml"
+    config_path.write_text(
+        "experiment: bff_soup\n"
+        "name: fast_test\n"
+        "seed: 5\n"
+        "population:\n  size: 16\n  genome_length: 8\n"
+        "execution:\n  max_steps: 100\n"
+        "run:\n  epochs: 6\n  report_interval: 2\n"
+    )
+    return config_path
+
+
+def test_cli_save_and_resume_checkpoint(tmp_path, capsys):
+    from computational_life.storage.checkpoints import load_checkpoint
+
+    config_path = _write_fast_config(tmp_path)
+    checkpoint_path = tmp_path / "final"
+
+    main(["run", str(config_path), "--save-checkpoint", str(checkpoint_path)])
+    out = capsys.readouterr().out
+    assert "Final checkpoint saved" in out
+
+    restored = load_checkpoint(checkpoint_path)
+    assert restored.epoch == 6
+
+    main(["run", str(config_path), "--resume-from", str(checkpoint_path), "--epochs", "4"])
+    out = capsys.readouterr().out
+    assert "Resumed from checkpoint at epoch 6" in out
+    assert "epoch=      10" in out  # 6 + 4 more
+
+
+def test_cli_resume_from_rejects_seed_override(tmp_path, capsys):
+    config_path = _write_fast_config(tmp_path)
+    checkpoint_path = tmp_path / "ckpt"
+    main(["run", str(config_path), "--save-checkpoint", str(checkpoint_path)])
+    capsys.readouterr()
+
+    exit_code = main(
+        ["run", str(config_path), "--resume-from", str(checkpoint_path), "--seed", "1"]
+    )
+    assert exit_code == 1
+    assert "no effect" in capsys.readouterr().out
+
+
+def test_cli_periodic_checkpoints_are_written_at_configured_interval(tmp_path, capsys):
+    config_path = _write_fast_config(tmp_path)
+    checkpoint_dir = tmp_path / "checkpoints"
+
+    main(
+        [
+            "run",
+            str(config_path),
+            "--checkpoint-dir",
+            str(checkpoint_dir),
+            "--checkpoint-interval",
+            "2",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "Checkpoint saved" in out
+
+    saved = sorted(p.name for p in checkpoint_dir.glob("*.npz"))
+    assert saved == ["epoch_0000000002.npz", "epoch_0000000004.npz", "epoch_0000000006.npz"]

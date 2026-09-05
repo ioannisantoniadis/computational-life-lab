@@ -41,9 +41,19 @@ def run_bff_soup(
     config: BffSoupExperimentConfig,
     *,
     on_report: Callable[[dict], None] | None = None,
+    universe: BffSoupUniverse | None = None,
+    on_checkpoint: Callable[[BffSoupUniverse], None] | None = None,
+    checkpoint_interval: int | None = None,
 ) -> BffSoupUniverse:
-    """Run the bff_soup experiment to completion and return the universe."""
-    universe = BffSoupUniverse(config.universe)
+    """Run the bff_soup experiment for ``config.epochs`` more epochs.
+
+    ``universe``, if given, is used as the starting point instead of a
+    fresh random population -- this is how resuming from a checkpoint
+    works (spec section 24): load one with
+    ``storage.checkpoints.load_checkpoint`` and pass it in here.
+    """
+    if universe is None:
+        universe = BffSoupUniverse(config.universe)
 
     if on_report is not None:
         on_report(compute_metrics(universe))
@@ -52,5 +62,11 @@ def run_bff_soup(
         universe.step_epoch()
         if on_report is not None and universe.epoch % config.report_interval == 0:
             on_report(compute_metrics(universe))
+        if (
+            on_checkpoint is not None
+            and checkpoint_interval
+            and universe.epoch % checkpoint_interval == 0
+        ):
+            on_checkpoint(universe)
 
     return universe
