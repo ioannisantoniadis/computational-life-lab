@@ -18,9 +18,15 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from rendering import population_to_cluster_grid, select_display_sample
+from rendering import (
+    instruction_distribution,
+    population_to_cluster_grid,
+    render_tape_html,
+    select_display_sample,
+)
 
 from computational_life.experiments.base import load_bff_soup_config
+from computational_life.substrates.bff.interpreter import BffInterpreter
 from computational_life.substrates.bff.universe import BffSoupUniverse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -171,6 +177,115 @@ with right:
         "replicator or species classifications. Replication detection is a "
         "separate analysis step (spec section 13), not yet implemented."
     )
+
+st.divider()
+inspector_col, debugger_col = st.columns(2)
+
+with inspector_col:
+    st.subheader("Genome inspector")
+    organism_index = st.number_input(
+        "Organism index",
+        min_value=0,
+        max_value=config.universe.population_size - 1,
+        value=0,
+        step=1,
+        key="inspector_index",
+    )
+    organism = universe.get_organism(int(organism_index))
+    info_cols = st.columns(3)
+    info_cols[0].metric("Organism ID", organism.organism_id)
+    info_cols[1].metric("Generation", organism.generation)
+    info_cols[2].metric("Age (epochs)", universe.epoch - organism.birth_epoch)
+    st.caption(
+        f"Parents: {organism.parent_ids[0]}, {organism.parent_ids[1]}  |  "
+        f"Birth epoch: {organism.birth_epoch}  |  Genome length: "
+        f"{len(organism.genome)}"
+    )
+    st.markdown(render_tape_html(organism.genome), unsafe_allow_html=True)
+    st.caption("Bold = active instruction, faint '0' = NULL sentinel, small hex = NOP byte.")
+
+    dist = instruction_distribution(organism.genome)
+    dist_df = pd.DataFrame(
+        sorted(dist.items(), key=lambda kv: -kv[1]), columns=["instruction", "count"]
+    )
+    fig_dist = px.bar(
+        dist_df,
+        x="instruction",
+        y="count",
+        labels={"instruction": "Decoded instruction", "count": "Byte count"},
+        title="Instruction distribution (this genome)",
+    )
+    st.plotly_chart(fig_dist, width="stretch")
+    st.caption(
+        "Lineage and replication statistics are not shown here -- they "
+        "require the analysis modules planned for Phase 3 (spec section "
+        "13/15), not yet implemented."
+    )
+
+with debugger_col:
+    st.subheader("Execution debugger")
+    st.caption(
+        "Pairs two organisms' *current* genomes into a 128-byte tape and "
+        "lets you step through BFF execution by hand, using the same "
+        "interpreter the simulator itself uses. This is exploratory: it is "
+        "not necessarily the pairing that actually happened in the "
+        "simulation history."
+    )
+    partner_index = st.number_input(
+        "Partner organism index",
+        min_value=0,
+        max_value=config.universe.population_size - 1,
+        value=min(int(organism_index) + 1, config.universe.population_size - 1),
+        step=1,
+        key="debugger_partner_index",
+    )
+
+    if st.button("Load pair into debugger", width="stretch"):
+        left_genome = universe.get_organism(int(organism_index)).genome
+        right_genome = universe.get_organism(int(partner_index)).genome
+        combined = bytearray(left_genome + right_genome)
+        st.session_state.debug_interp = BffInterpreter(
+            combined, head_init=config.universe.head_init
+        )
+
+    interp: BffInterpreter | None = st.session_state.get("debug_interp")
+    if interp is None:
+        st.info("Load a pair to start stepping through its execution.")
+    else:
+        control_cols = st.columns(3)
+        if control_cols[0].button("Step", key="debug_step", width="stretch"):
+            interp.step()
+        if control_cols[1].button("Run to halt", key="debug_run", width="stretch"):
+            interp.run(max_steps=config.universe.max_steps)
+        if control_cols[2].button("Reset", key="debug_reset", width="stretch"):
+            interp.reset()
+
+        # Read state *after* applying any button action above, so the
+        # displayed metrics/tape reflect this click's effect immediately
+        # rather than lagging one click behind.
+        state = interp.state
+        debug_cols = st.columns(4)
+        debug_cols[0].metric("Step", state.step_count)
+        debug_cols[1].metric("PC", state.instruction_pointer if not state.halted else "-")
+        debug_cols[2].metric("head0", state.head0)
+        debug_cols[3].metric("head1", state.head1)
+
+        st.markdown(
+            render_tape_html(
+                state.tape,
+                head0=None if state.halted else state.head0,
+                head1=None if state.halted else state.head1,
+                pc=None if state.halted else state.instruction_pointer,
+            ),
+            unsafe_allow_html=True,
+        )
+        if state.halted:
+            st.caption(f"Halted after {state.step_count} steps.")
+        else:
+            st.caption(
+                f"Current instruction: {state.current_instruction.name} | "
+                "blue = head0, red = head1, green = program counter."
+            )
 
 if st.session_state.get("playing"):
     _step(int(epochs_per_step))

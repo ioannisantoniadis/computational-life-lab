@@ -12,7 +12,13 @@ import math
 
 import numpy as np
 
+from computational_life.substrates.bff.instruction_set import OP_TO_BYTE, Op, decode
+
 DEFAULT_MAX_DISPLAYED_ORGANISMS = 10_000
+
+# One display character per instruction Op, derived from the canonical
+# byte encoding rather than duplicated by hand.
+_OP_SYMBOL = {op: chr(byte) for op, byte in OP_TO_BYTE.items() if op != Op.NULL}
 
 
 def grid_shape(n: int) -> tuple[int, int]:
@@ -65,3 +71,73 @@ def population_to_cluster_grid(population: np.ndarray) -> tuple[np.ndarray, int]
     grid = np.full(rows * cols, -1, dtype=np.int64)
     grid[:n] = inverse
     return grid.reshape(rows, cols), num_unique
+
+
+def genome_symbols(genome: bytes) -> list[tuple[str, str]]:
+    """Per-byte (symbol, category) pairs for rendering a genome.
+
+    category is one of "instruction", "null", or "nop" -- spec section 18
+    asks that active instructions be visually distinguished from NOP bytes.
+    """
+    symbols = []
+    for byte in genome:
+        op = decode(byte)
+        if op is Op.NULL:
+            symbols.append(("0", "null"))
+        elif op is Op.NOP:
+            symbols.append((f"{byte:02x}", "nop"))
+        else:
+            symbols.append((_OP_SYMBOL[op], "instruction"))
+    return symbols
+
+
+_CATEGORY_STYLE = {
+    "instruction": "color:#111827; font-weight:700;",
+    "null": "color:#9ca3af;",
+    "nop": "color:#d1d5db; font-size:0.8em;",
+}
+
+# Matches the head0/head1/pc debug colors used by the reference cubff
+# implementation's own PrintProgramInternal (blue/red/green respectively).
+_HEAD0_BG = "#bfdbfe"
+_HEAD1_BG = "#fecaca"
+_PC_BG = "#bbf7d0"
+
+
+def render_tape_html(
+    tape: bytes, *, head0: int | None = None, head1: int | None = None, pc: int | None = None
+) -> str:
+    """Render a tape as monospace HTML spans, one per byte.
+
+    Instruction bytes are bold, the NULL sentinel is muted, and NOP bytes
+    are shown as small hex codes (spec section 18's "distinguish active
+    instructions from NOP bytes"). When given, head0/head1/pc positions
+    are highlighted with a background color, matching the color scheme
+    the reference BFF implementation itself uses for its own debug output.
+    """
+    spans = []
+    for i, (symbol, category) in enumerate(genome_symbols(tape)):
+        style = _CATEGORY_STYLE[category]
+        bg = None
+        if pc is not None and i == pc:
+            bg = _PC_BG
+        elif head0 is not None and i == head0:
+            bg = _HEAD0_BG
+        elif head1 is not None and i == head1:
+            bg = _HEAD1_BG
+        if bg:
+            style += f" background-color:{bg}; border-radius:3px;"
+        spans.append(f'<span style="{style} padding:1px 2px;">{symbol}</span>')
+    return (
+        '<div style="font-family:monospace; font-size:1.1em; line-height:1.8; '
+        'word-break:break-all;">' + "".join(spans) + "</div>"
+    )
+
+
+def instruction_distribution(genome: bytes) -> dict[str, int]:
+    """Count of each decoded Op across a genome, keyed by Op name."""
+    counts: dict[str, int] = {}
+    for byte in genome:
+        name = decode(byte).name
+        counts[name] = counts.get(name, 0) + 1
+    return counts
