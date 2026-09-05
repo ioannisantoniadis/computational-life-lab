@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from .experiments.base import load_bff_soup_config
 from .experiments.bff_soup import run_bff_soup
@@ -44,8 +45,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
     store = None
     run_id = None
     if args.db:
-        from pathlib import Path
-
         from .storage.database import RunStore
 
         store = RunStore(args.db)
@@ -64,19 +63,30 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if store is not None:
             store.record_metrics(run_id, metrics["epoch"], metrics)
 
+    # When persisting to a database, namespace checkpoints under runs/<id>/
+    # so two runs sharing a --checkpoint-dir never collide on filenames,
+    # and record each save as an event so a checkpoint's provenance (which
+    # run, which epoch) is queryable from the database rather than only
+    # inferable from a filename.
+    def checkpoint_subdir(base: Path) -> Path:
+        return base / f"run_{run_id}" if store is not None else base
+
     on_checkpoint = None
     if args.checkpoint_dir:
-        from pathlib import Path
+        from .storage.checkpoints import checkpoint_file_path, save_checkpoint
 
-        from .storage.checkpoints import save_checkpoint
-
-        checkpoint_dir = Path(args.checkpoint_dir)
+        checkpoint_dir = checkpoint_subdir(Path(args.checkpoint_dir))
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         def on_checkpoint(universe) -> None:
             checkpoint_path = checkpoint_dir / f"epoch_{universe.epoch:010d}"
             save_checkpoint(universe, checkpoint_path)
-            print(f"Checkpoint saved: {checkpoint_path}.npz")
+            saved_path = checkpoint_file_path(checkpoint_path)
+            print(f"Checkpoint saved: {saved_path}")
+            if store is not None:
+                store.record_event(
+                    run_id, universe.epoch, "checkpoint_saved", {"path": str(saved_path)}
+                )
 
     try:
         universe = run_bff_soup(
@@ -93,15 +103,47 @@ def _cmd_run(args: argparse.Namespace) -> int:
         raise
 
     if args.save_checkpoint:
-        from .storage.checkpoints import save_checkpoint
+        from .storage.checkpoints import checkpoint_file_path, save_checkpoint
 
-        save_checkpoint(universe, args.save_checkpoint)
-        print(f"Final checkpoint saved to {args.save_checkpoint}")
+        final_checkpoint_path = Path(args.save_checkpoint)
+        if store is not None:
+            final_dir = checkpoint_subdir(final_checkpoint_path.parent)
+            final_dir.mkdir(parents=True, exist_ok=True)
+            final_checkpoint_path = final_dir / final_checkpoint_path.name
+        save_checkpoint(universe, final_checkpoint_path)
+        saved_path = checkpoint_file_path(final_checkpoint_path)
+        print(f"Final checkpoint saved to {saved_path}")
+        if store is not None:
+            store.record_event(run_id, universe.epoch, "checkpoint_saved", {"path": str(saved_path)})
 
     if store is not None:
         store.finish_run(run_id, final_epoch=universe.epoch)
         print(f"Run {run_id} saved to {args.db}")
         store.close()
+    return 0
+
+
+def _cmd_list_runs(args: argparse.Namespace) -> int:
+    from datetime import datetime
+
+    from .storage.database import RunStore
+
+    with RunStore(args.db) as store:
+        runs = store.list_runs()
+        if args.experiment:
+            runs = [r for r in runs if r["experiment_name"] == args.experiment]
+
+    if not runs:
+        print(f"No runs found in {args.db}" + (f" for experiment '{args.experiment}'" if args.experiment else ""))
+        return 0
+
+    print(f"{'id':>4}  {'experiment_name':<28}  {'seed':>8}  {'status':<10}  {'final_epoch':>11}  started_at")
+    for run in runs:
+        started = datetime.fromtimestamp(run["started_at"]).strftime("%Y-%m-%d %H:%M:%S")
+        print(
+            f"{run['id']:>4}  {run['experiment_name']:<28}  {run['seed']:>8}  "
+            f"{run['status']:<10}  {str(run['final_epoch']):>11}  {started}"
+        )
     return 0
 
 
@@ -212,6 +254,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Epochs between periodic checkpoints (only used with --checkpoint-dir)",
     )
     run_parser.set_defaults(func=_cmd_run)
+
+    list_runs_parser = subparsers.add_parser("list-runs", help="List runs stored in a database")
+    list_runs_parser.add_argument("--db", required=True, help="SQLite database path to read from")
+    list_runs_parser.add_argument(
+        "--experiment", default=None, help="Only show runs with this experiment name"
+    )
+    list_runs_parser.set_defaults(func=_cmd_list_runs)
 
     analyze_parser = subparsers.add_parser("analyze", help="Summarize a stored run")
     analyze_parser.add_argument("run_id", type=int, help="Run id to summarize")

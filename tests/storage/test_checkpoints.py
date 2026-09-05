@@ -1,12 +1,28 @@
+from pathlib import Path
+
 import numpy as np
 
 from computational_life import __version__
 from computational_life.storage.checkpoints import (
+    checkpoint_file_path,
     checkpoint_metadata,
     load_checkpoint,
     save_checkpoint,
 )
 from computational_life.substrates.bff.universe import BffSoupConfig, BffSoupUniverse
+
+
+def test_checkpoint_file_path_appends_npz_when_missing():
+    assert checkpoint_file_path("foo") == Path("foo.npz")
+    assert checkpoint_file_path("dir/foo") == Path("dir/foo.npz")
+
+
+def test_checkpoint_file_path_does_not_double_append():
+    assert checkpoint_file_path("foo.npz") == Path("foo.npz")
+
+
+def test_checkpoint_file_path_preserves_other_extensions():
+    assert checkpoint_file_path("foo.dat") == Path("foo.dat.npz")
 
 
 def make_universe(**overrides) -> BffSoupUniverse:

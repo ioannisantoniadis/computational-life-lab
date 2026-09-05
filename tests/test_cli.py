@@ -146,6 +146,94 @@ def test_cli_periodic_checkpoints_are_written_at_configured_interval(tmp_path, c
     assert saved == ["epoch_0000000002.npz", "epoch_0000000004.npz", "epoch_0000000006.npz"]
 
 
+def test_cli_checkpoints_are_namespaced_by_run_id_and_recorded_as_events(tmp_path, capsys):
+    from computational_life.storage.database import RunStore
+
+    config_path = _write_fast_config(tmp_path)
+    checkpoint_dir = tmp_path / "checkpoints"
+    db_path = tmp_path / "runs.db"
+
+    main(
+        [
+            "run",
+            str(config_path),
+            "--checkpoint-dir",
+            str(checkpoint_dir),
+            "--checkpoint-interval",
+            "2",
+            "--db",
+            str(db_path),
+        ]
+    )
+    capsys.readouterr()
+
+    with RunStore(db_path) as store:
+        [run] = store.list_runs()
+        run_id = run["id"]
+        checkpoint_events = [e for e in store.get_events(run_id) if e["kind"] == "checkpoint_saved"]
+
+    assert len(checkpoint_events) == 3  # epochs 2, 4, 6
+    run_subdir = checkpoint_dir / f"run_{run_id}"
+    assert run_subdir.is_dir()
+    saved_files = sorted(p.name for p in run_subdir.glob("*.npz"))
+    assert saved_files == ["epoch_0000000002.npz", "epoch_0000000004.npz", "epoch_0000000006.npz"]
+    for event in checkpoint_events:
+        assert Path(event["payload"]["path"]).exists()
+
+
+def test_cli_two_runs_sharing_a_checkpoint_dir_do_not_collide(tmp_path, capsys):
+    config_path = _write_fast_config(tmp_path)
+    checkpoint_dir = tmp_path / "checkpoints"
+    db_path = tmp_path / "runs.db"
+
+    for _ in range(2):
+        main(
+            [
+                "run",
+                str(config_path),
+                "--checkpoint-dir",
+                str(checkpoint_dir),
+                "--checkpoint-interval",
+                "2",
+                "--db",
+                str(db_path),
+            ]
+        )
+    capsys.readouterr()
+
+    run_subdirs = sorted(p.name for p in checkpoint_dir.iterdir())
+    assert run_subdirs == ["run_1", "run_2"]
+    for subdir in run_subdirs:
+        assert len(list((checkpoint_dir / subdir).glob("*.npz"))) == 3
+
+
+def test_cli_list_runs_shows_all_runs(tmp_path, capsys):
+    config_path = _write_fast_config(tmp_path)
+    db_path = tmp_path / "runs.db"
+    main(["run", str(config_path), "--db", str(db_path)])
+    main(["run", str(config_path), "--seed", "2", "--db", str(db_path)])
+    capsys.readouterr()
+
+    exit_code = main(["list-runs", "--db", str(db_path)])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len(lines) == 3  # header + 2 runs
+    assert "fast_test" in lines[1]
+    assert "completed" in lines[1]
+
+
+def test_cli_list_runs_filters_by_experiment(tmp_path, capsys):
+    config_path = _write_fast_config(tmp_path)
+    db_path = tmp_path / "runs.db"
+    main(["run", str(config_path), "--db", str(db_path)])
+    capsys.readouterr()
+
+    main(["list-runs", "--db", str(db_path), "--experiment", "does_not_exist"])
+    out = capsys.readouterr().out
+    assert "No runs found" in out
+
+
 def _write_fast_sweep_config(path: Path) -> Path:
     config_path = path / "fast_sweep.yaml"
     config_path.write_text(

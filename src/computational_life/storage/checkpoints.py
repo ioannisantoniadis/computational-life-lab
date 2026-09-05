@@ -27,9 +27,15 @@ from .. import __version__
 from ..substrates.bff.universe import BffSoupConfig, BffSoupUniverse
 
 
-def _normalize_path(path: str | Path) -> Path:
-    """``np.savez`` silently appends .npz if missing; normalize up front
-    so save/load/checkpoint_metadata always agree on the actual filename.
+def checkpoint_file_path(path: str | Path) -> Path:
+    """The actual filename a checkpoint will be saved/loaded under.
+
+    ``np.savez`` silently appends .npz if missing; normalizing up front
+    (and exposing it publicly) means save/load/checkpoint_metadata and
+    any caller that needs to know the real on-disk name -- e.g. to record
+    it in an event log -- all agree, rather than each re-deriving it (or
+    naively concatenating ".npz", which double-appends when the given
+    path already ends in .npz).
     """
     path = Path(path)
     return path if path.suffix == ".npz" else path.with_suffix(path.suffix + ".npz")
@@ -44,7 +50,7 @@ def save_checkpoint(universe: BffSoupUniverse, path: str | Path) -> None:
         "rng_state": universe.rng.state(),
     }
     np.savez_compressed(
-        _normalize_path(path),
+        checkpoint_file_path(path),
         population=universe.population,
         organism_id=universe.organism_id,
         generation=universe.generation,
@@ -55,7 +61,7 @@ def save_checkpoint(universe: BffSoupUniverse, path: str | Path) -> None:
 
 
 def load_checkpoint(path: str | Path) -> BffSoupUniverse:
-    with np.load(_normalize_path(path), allow_pickle=False) as data:
+    with np.load(checkpoint_file_path(path), allow_pickle=False) as data:
         metadata = json.loads(str(data["metadata"]))
         config = BffSoupConfig(**metadata["config"])
         return BffSoupUniverse.from_state(
@@ -73,5 +79,5 @@ def load_checkpoint(path: str | Path) -> BffSoupUniverse:
 
 def checkpoint_metadata(path: str | Path) -> dict:
     """Read a checkpoint's metadata without loading the full population."""
-    with np.load(_normalize_path(path), allow_pickle=False) as data:
+    with np.load(checkpoint_file_path(path), allow_pickle=False) as data:
         return json.loads(str(data["metadata"]))
