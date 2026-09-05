@@ -1,6 +1,6 @@
 from computational_life.experiments.base import BffSoupExperimentConfig
-from computational_life.experiments.bff_soup import run_bff_soup
-from computational_life.substrates.bff.universe import BffSoupConfig
+from computational_life.experiments.bff_soup import compute_metrics, run_bff_soup
+from computational_life.substrates.bff.universe import BffSoupConfig, BffSoupUniverse
 
 
 def make_config(**overrides) -> BffSoupExperimentConfig:
@@ -37,3 +37,24 @@ def test_run_bff_soup_diverges_across_seeds():
     u1 = run_bff_soup(make_config(seed=1, universe=universe_a))
     u2 = run_bff_soup(make_config(seed=2, universe=universe_b))
     assert not (u1.population == u2.population).all()
+
+
+def test_compute_metrics_has_expected_keys_and_bounds():
+    universe = BffSoupUniverse(BffSoupConfig(population_size=32, genome_length=16, seed=1))
+    record = compute_metrics(universe)
+
+    assert record["epoch"] == 0
+    assert 1 <= record["unique_genomes"] <= 32
+    assert 0 < record["dominant_genome_frequency"] <= 1.0
+    assert 0.0 <= record["simpson_diversity"] <= 1.0
+    assert record["genome_entropy_bits"] >= 0.0
+    assert 0.0 <= record["byte_entropy_bits"] <= 8.0
+    assert record["instruction_entropy_bits"] >= 0.0
+    assert 0.0 <= record["compressed_bits_per_byte"] <= 8.5
+
+
+def test_compute_metrics_tracks_epoch_progress():
+    universe = BffSoupUniverse(BffSoupConfig(population_size=32, genome_length=16, seed=1))
+    universe.step_epoch()
+    universe.step_epoch()
+    assert compute_metrics(universe)["epoch"] == 2

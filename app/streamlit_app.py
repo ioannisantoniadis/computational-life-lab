@@ -18,7 +18,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from metrics import compute_metrics_record
 
 from rendering import (
     instruction_distribution,
@@ -30,6 +29,7 @@ from rendering import (
 from computational_life.analysis.lineage import LineageRecorder
 from computational_life.analysis.replication import classify, replication_score, replication_scores
 from computational_life.experiments.base import load_bff_soup_config
+from computational_life.experiments.bff_soup import compute_metrics
 from computational_life.substrates.bff.interpreter import BffInterpreter
 from computational_life.substrates.bff.universe import BffSoupUniverse
 
@@ -53,7 +53,7 @@ def _init_universe(config_name: str, seed_override: int | None) -> None:
         )
     st.session_state.config = config
     st.session_state.universe = BffSoupUniverse(config.universe)
-    st.session_state.history = [compute_metrics_record(st.session_state.universe)]
+    st.session_state.history = [compute_metrics(st.session_state.universe)]
     st.session_state.playing = False
     st.session_state.scan_results = None
     if st.session_state.get("track_lineage"):
@@ -71,7 +71,7 @@ def _step(num_epochs: int) -> None:
         recorder: LineageRecorder | None = st.session_state.get("lineage_recorder")
         if recorder is not None:
             recorder.record(universe)
-    st.session_state.history.append(compute_metrics_record(universe))
+    st.session_state.history.append(compute_metrics(universe))
 
 
 st.title("Computational Life Lab")
