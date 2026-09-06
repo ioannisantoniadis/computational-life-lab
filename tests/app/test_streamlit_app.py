@@ -99,6 +99,10 @@ def test_lineage_tracking_toggle_shows_ancestor_metrics():
     assert ancestors_metric.value == "2"
     assert descendants_metric.value == "0"
 
+    # With 2 recorded ancestors, the lineage graph (organism + its 2
+    # parents = 3 nodes) should render without exception.
+    assert any("DAG, not a strict" in c.value for c in at.caption)
+
 
 def test_replication_score_button_computes_and_displays_score():
     at = AppTest.from_file(str(APP_PATH))

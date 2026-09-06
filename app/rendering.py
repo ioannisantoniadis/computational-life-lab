@@ -9,10 +9,14 @@ must never feed back into the simulator (spec section 3.2).
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from computational_life.substrates.bff.instruction_set import OP_TO_BYTE, Op, decode
+
+if TYPE_CHECKING:
+    from computational_life.analysis.lineage import LineageRecorder
 
 DEFAULT_MAX_DISPLAYED_ORGANISMS = 10_000
 
@@ -141,3 +145,53 @@ def instruction_distribution(genome: bytes) -> dict[str, int]:
         name = decode(byte).name
         counts[name] = counts.get(name, 0) + 1
     return counts
+
+
+def lineage_graph(
+    recorder: LineageRecorder,
+    organism_id: int,
+    *,
+    max_ancestors: int = 40,
+    max_descendants: int = 40,
+) -> tuple[dict[int, tuple[float, float]], list[tuple[int, int]]]:
+    """Node positions and parent->child edges for a lineage graph centered
+    on one organism (spec section 15's "select organism -> show ancestors
+    -> show descendants -> show lineage tree").
+
+    Ancestry here is a DAG, not a tree: every organism has *two* parents,
+    so two lineages can merge back into one. This deliberately does not
+    invent a single "root ancestor" per organism (usually none exists
+    once lineages have merged) -- it just lays out whichever ancestors
+    and descendants were recorded, positioned by generation (x-axis) with
+    an arbitrary vertical spread within each generation to avoid overlap.
+
+    Truncates to the nearest ``max_ancestors``/``max_descendants`` (by
+    the recorder's breadth-first order, i.e. closest relatives first) so
+    the diagram stays legible for a long, heavily-recorded run. Returns
+    (positions, edges); positions maps organism_id -> (x, y).
+    """
+    ancestors = recorder.ancestors(organism_id)[:max_ancestors]
+    descendants = recorder.descendants(organism_id)[:max_descendants]
+    node_ids = {organism_id, *ancestors, *descendants}
+
+    by_generation: dict[int, list[int]] = {}
+    for oid in node_ids:
+        by_generation.setdefault(recorder.generation(oid), []).append(oid)
+
+    positions: dict[int, tuple[float, float]] = {}
+    for gen, ids in by_generation.items():
+        ids = sorted(ids)
+        offset = (len(ids) - 1) / 2
+        for i, oid in enumerate(ids):
+            positions[oid] = (float(gen), i - offset)
+
+    edges: list[tuple[int, int]] = []
+    for oid in node_ids:
+        parents = recorder.parents(oid)
+        if not parents:
+            continue
+        for parent_id in parents:
+            if parent_id in node_ids:
+                edges.append((parent_id, oid))
+
+    return positions, edges

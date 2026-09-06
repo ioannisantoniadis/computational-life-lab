@@ -21,6 +21,7 @@ import streamlit as st
 
 from rendering import (
     instruction_distribution,
+    lineage_graph,
     population_to_cluster_grid,
     render_tape_html,
     select_display_sample,
@@ -401,6 +402,51 @@ with inspector_col:
         lineage_cols[1].metric(
             "Recorded descendants", len(recorder.descendants(organism.organism_id))
         )
+
+        positions, edges = lineage_graph(recorder, organism.organism_id)
+        if len(positions) > 1:
+            fig_lineage = go.Figure()
+            edge_x, edge_y = [], []
+            for parent_id, child_id in edges:
+                edge_x += [positions[parent_id][0], positions[child_id][0], None]
+                edge_y += [positions[parent_id][1], positions[child_id][1], None]
+            fig_lineage.add_scatter(
+                x=edge_x, y=edge_y, mode="lines", line=dict(color="#cbd5e1", width=1),
+                hoverinfo="skip", showlegend=False,
+            )
+            other_ids = [oid for oid in positions if oid != organism.organism_id]
+            fig_lineage.add_scatter(
+                x=[positions[oid][0] for oid in other_ids],
+                y=[positions[oid][1] for oid in other_ids],
+                mode="markers",
+                marker=dict(size=10, color="#93c5fd"),
+                text=[f"organism {oid}" for oid in other_ids],
+                hoverinfo="text",
+                name="ancestor/descendant",
+            )
+            fig_lineage.add_scatter(
+                x=[positions[organism.organism_id][0]],
+                y=[positions[organism.organism_id][1]],
+                mode="markers",
+                marker=dict(size=16, color="#ef4444"),
+                text=[f"organism {organism.organism_id} (selected)"],
+                hoverinfo="text",
+                name="selected",
+            )
+            fig_lineage.update_layout(
+                title="Lineage graph (x = generation)",
+                xaxis_title="Generation",
+                yaxis=dict(visible=False),
+                showlegend=False,
+                height=300,
+                margin=dict(l=0, r=0, t=40, b=0),
+            )
+            st.plotly_chart(fig_lineage, width="stretch")
+            st.caption(
+                "Each organism has two parents, so this is a DAG, not a strict "
+                "tree -- lineages can merge. Truncated to the nearest 40 "
+                "ancestors/descendants for legibility."
+            )
 
     st.markdown("**Replication check**")
     st.caption(

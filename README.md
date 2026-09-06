@@ -37,11 +37,13 @@ infrastructure (SQLite run storage, checkpointing, parameter sweeps --
 including loading a stored run's history and population back into the
 dashboard and continuing it from its last checkpoint).
 
-Not yet built: a lineage-tree visualization and population coloring by
-lineage (ancestry data exists and is queryable, but not drawn as a
-tree), automatic "candidate replicator detected" event flagging during
-a live run (detection exists but is on-demand/end-of-run only), a UI
-page for comparing multiple stored runs side by side, and Phase 5
+Not yet built: population coloring by lineage (ancestry is a DAG since
+every organism has two parents, so a single "founder color" per
+organism usually isn't well-defined beyond a couple of generations --
+the lineage graph for one selected organism is drawn instead, honestly,
+rather than inventing a per-organism founder color), automatic
+"candidate replicator detected" event flagging during a live run
+(detection exists but is on-demand/end-of-run only), and Phase 5
 (generic substrates beyond BFF) -- deliberately deferred until the BFF
 system has been pushed further.
 
