@@ -22,7 +22,7 @@ import streamlit as st
 from rendering import (
     instruction_distribution,
     lineage_graph,
-    population_to_cluster_grid,
+    population_to_highlight_grid,
     render_tape_html,
     select_display_sample,
 )
@@ -228,8 +228,23 @@ status_cols[3].metric("Seed", config.universe.seed)
 
 left, right = st.columns([2, 1])
 
+# A qualitative, maximally-distinguishable palette (a subset of the
+# well-known "Kelly colors" set) for the population grid's highlighted
+# (repeated-genome) clusters. Background/overflow/padding use neutral
+# grays/white so real clusters visually pop out rather than blending
+# into rainbow noise -- see rendering.population_to_highlight_grid's
+# docstring for why every unique genome no longer gets its own color.
+_HIGHLIGHT_RGB = [
+    (230, 25, 75), (60, 180, 75), (255, 195, 0), (0, 130, 200),
+    (245, 130, 48), (145, 30, 180), (70, 200, 200), (240, 50, 230),
+    (170, 200, 40), (250, 150, 175), (0, 128, 128), (200, 180, 255),
+]
+_BACKGROUND_RGB = (229, 231, 235)  # unique/unrepeated genomes
+_OVERFLOW_RGB = (156, 163, 175)  # repeated, but below the highlight cap
+_PADDING_RGB = (255, 255, 255)  # grid padding cells (not a real organism)
+
 with left:
-    st.subheader("Population (colored by genome identity)")
+    st.subheader("Population (repeated genomes highlighted)")
     display_indices = select_display_sample(
         config.universe.population_size, max_displayed=max_displayed
     )
@@ -238,29 +253,45 @@ with left:
             f"Showing a fixed random sample of {len(display_indices):,} of "
             f"{config.universe.population_size:,} organisms."
         )
-    grid, num_unique = population_to_cluster_grid(universe.population[display_indices])
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=grid,
-            colorscale="Turbo",
-            zmin=-1,
-            showscale=False,
-            hoverinfo="skip",
-        )
+    max_highlighted = len(_HIGHLIGHT_RGB)
+    grid, highlight_legend = population_to_highlight_grid(
+        universe.population[display_indices], max_highlighted=max_highlighted
     )
+    palette = np.array(
+        [_PADDING_RGB, _BACKGROUND_RGB, *_HIGHLIGHT_RGB, _OVERFLOW_RGB], dtype=np.uint8
+    )
+    rgb_image = palette[grid + 1]  # shifts -1/0/1..K/K+1 to valid palette indices
+
+    fig = go.Figure(data=go.Image(z=rgb_image, hoverinfo="skip"))
     fig.update_layout(
         margin=dict(l=0, r=0, t=0, b=0),
         xaxis=dict(visible=False),
-        yaxis=dict(visible=False, autorange="reversed"),
+        yaxis=dict(visible=False),
         height=500,
     )
     st.plotly_chart(fig, width="stretch")
-    st.caption(
-        "Each cell is one organism; identical color (within this snapshot) "
-        "means byte-identical genomes. Colors are reassigned every redraw "
-        "and carry no meaning across snapshots or between organisms of "
-        "different colors."
-    )
+
+    if highlight_legend:
+        badges = " ".join(
+            f'<span style="background-color:rgb{_HIGHLIGHT_RGB[e["rank"] - 1]}; '
+            f'color:white; padding:2px 8px; border-radius:3px; margin-right:4px; '
+            f'font-size:0.85em;">#{e["rank"]}: {e["count"]} ({e["frequency"]:.1%})</span>'
+            for e in highlight_legend
+        )
+        st.markdown(badges, unsafe_allow_html=True)
+        st.caption(
+            "Each badge is one repeated genome (rank = most frequent first). "
+            "Gray cells are unique genomes -- with 256^genome_length possible "
+            "values, an exact duplicate arising by chance is astronomically "
+            "unlikely, so any repeat shown here is a real signal, not noise. "
+            "Darker gray (if visible) means 'repeated, but outside the "
+            f"top {max_highlighted}'."
+        )
+    else:
+        st.caption(
+            "Every displayed organism currently has a unique genome -- "
+            "nothing has repeated (by chance or otherwise) yet."
+        )
 
 with right:
     st.subheader("Population metrics")

@@ -54,15 +54,26 @@ waiting for it to finish, or babysitting it live.
 
 ## Watching the population
 
-**Population (colored by genome identity)**: one cell per organism
+**Population (repeated genomes highlighted)**: one cell per organism
 (subsampled for large populations — the "max organisms drawn in grid"
 slider controls how many; the simulation itself always runs on the
-full population regardless of what's drawn). Identical color *within
-one snapshot* means byte-identical genomes; colors are reassigned on
-every redraw and carry no meaning across snapshots or between different
-colors. Watching for a growing same-colored patch that *persists*
-across redraws — not just one snapshot's coincidence — is the visual
-signal worth following up on with the replication scan below.
+full population regardless of what's drawn). Most cells are a neutral
+gray, meaning that organism's genome is currently unique in the
+displayed sample — with 256^genome_length possible 64-byte genomes, an
+exact duplicate arising by pure chance is astronomically unlikely, so
+gray is the expected, uninformative default. Up to 12 of the most
+frequent *repeated* genomes get their own distinct, bright color
+instead (a legend below the grid shows each one's count and share of
+the sample); any others that repeat but don't make that cut share one
+darker gray "overflow" color, still distinguishable from true
+singletons. A growing, persistent patch of one bright color — not just
+one snapshot's coincidence — is the signal worth following up on with
+the replication scan below. (An earlier version of this grid gave every
+unique genome its own color from a continuous rainbow scale; that
+produces near-total visual noise once the population is diverse, since
+almost every cell then gets a different, essentially arbitrary color —
+this scheme was replaced because it didn't get more readable at any
+population size or scale of the visualization.)
 
 **Population metrics**: genome diversity (unique genome count) and
 dominant-genome frequency over the run's recorded history. Purely

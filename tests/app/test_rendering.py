@@ -6,7 +6,7 @@ from rendering import (
     grid_shape,
     instruction_distribution,
     lineage_graph,
-    population_to_cluster_grid,
+    population_to_highlight_grid,
     render_tape_html,
     select_display_sample,
 )
@@ -53,39 +53,77 @@ def test_select_display_sample_is_deterministic():
     assert np.array_equal(a, b)
 
 
-def test_cluster_grid_assigns_identical_ids_to_identical_genomes():
+def test_highlight_grid_all_unique_genomes_are_background():
+    population = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=np.uint8)
+    grid, legend = population_to_highlight_grid(population)
+    assert legend == []
+    valid = grid.flatten()[grid.flatten() >= 0]
+    assert (valid == 0).all()
+
+
+def test_highlight_grid_repeated_genome_gets_rank_one():
+    population = np.array(
+        [[1, 2, 3], [1, 2, 3], [1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=np.uint8
+    )
+    grid, legend = population_to_highlight_grid(population)
+    flat = grid.flatten()
+    valid = flat[flat >= 0]
+    assert len(legend) == 1
+    assert legend[0] == {"rank": 1, "count": 3, "frequency": pytest.approx(3 / 5)}
+    # The three [1,2,3] organisms (indices 0,1,2) all get rank 1; the two
+    # singletons (indices 3,4) get background (0).
+    assert list(valid[:3]) == [1, 1, 1]
+    assert list(valid[3:]) == [0, 0]
+
+
+def test_highlight_grid_ranks_by_descending_frequency():
     population = np.array(
         [
-            [1, 2, 3],
-            [1, 2, 3],
-            [4, 5, 6],
-            [7, 8, 9],
+            [1, 1], [1, 1],              # count 2
+            [2, 2], [2, 2], [2, 2],       # count 3 -- most frequent, should be rank 1
+            [3, 3],                        # unique
         ],
         dtype=np.uint8,
     )
-    grid, num_unique = population_to_cluster_grid(population)
-    assert num_unique == 3
+    grid, legend = population_to_highlight_grid(population)
+    assert [entry["rank"] for entry in legend] == [1, 2]
+    assert legend[0]["count"] == 3
+    assert legend[1]["count"] == 2
     flat = grid.flatten()
     valid = flat[flat >= 0]
-    assert len(valid) == 4
-    # The two identical genomes (indices 0 and 1) must share a cluster id.
-    assert flat[0] == flat[1]
-    assert flat[2] != flat[0]
-    assert flat[3] != flat[0]
-    assert flat[3] != flat[2]
+    assert list(valid) == [2, 2, 1, 1, 1, 0]  # rank 2 (count-2 cluster), rank 1, background
 
 
-def test_cluster_grid_shape_matches_grid_shape_and_pads_with_negative_one():
+def test_highlight_grid_caps_at_max_highlighted_and_uses_overflow_bucket():
+    # 5 distinct repeated genomes (counts 5,4,3,2,2), max_highlighted=3.
+    rows = (
+        [[0, 0]] * 5
+        + [[1, 1]] * 4
+        + [[2, 2]] * 3
+        + [[3, 3]] * 2
+        + [[4, 4]] * 2
+    )
+    population = np.array(rows, dtype=np.uint8)
+    grid, legend = population_to_highlight_grid(population, max_highlighted=3)
+    assert [entry["rank"] for entry in legend] == [1, 2, 3]
+    assert [entry["count"] for entry in legend] == [5, 4, 3]
+    flat = grid.flatten()
+    valid = flat[flat >= 0]
+    # The two count-2 clusters didn't make the top-3 cut -> overflow bucket (max_highlighted + 1 == 4).
+    assert (valid[-4:] == 4).all()
+
+
+def test_highlight_grid_shape_matches_grid_shape_and_pads_with_negative_one():
     population = np.zeros((5, 4), dtype=np.uint8)
-    grid, _ = population_to_cluster_grid(population)
+    grid, _ = population_to_highlight_grid(population)
     rows, cols = grid_shape(5)
     assert grid.shape == (rows, cols)
     assert (grid.flatten()[5:] == -1).all()
 
 
-def test_cluster_grid_rejects_non_2d_input():
+def test_highlight_grid_rejects_non_2d_input():
     with pytest.raises(ValueError):
-        population_to_cluster_grid(np.zeros(10, dtype=np.uint8))
+        population_to_highlight_grid(np.zeros(10, dtype=np.uint8))
 
 
 def test_genome_symbols_categorizes_instructions_null_and_nop():

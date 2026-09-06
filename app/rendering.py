@@ -52,29 +52,58 @@ def select_display_sample(
     return np.sort(rng.choice(population_size, size=max_displayed, replace=False))
 
 
-def population_to_cluster_grid(population: np.ndarray) -> tuple[np.ndarray, int]:
-    """Assign each displayed organism a genome-identity cluster id and lay
-    it out on a near-square grid.
+def population_to_highlight_grid(
+    population: np.ndarray, *, max_highlighted: int = 12
+) -> tuple[np.ndarray, list[dict]]:
+    """Lay organisms out on a near-square grid, color-coded by whether
+    their genome is *repeated*, not by raw genome identity.
 
-    Identical genomes get identical cluster ids (so identical-genome
-    clusters are visually apparent as same-colored regions); the mapping
-    from id to genome is arbitrary (lexicographic order of unique genomes)
-    and carries no scientific meaning on its own. Padding cells (when
-    rows * cols > len(population)) are filled with -1.
+    With 256**genome_length possible 64-byte genomes, an exact duplicate
+    arising by chance alone is astronomically unlikely -- so in a
+    healthy, diverse population, giving every unique genome its own
+    color (as an earlier version of this grid did) makes nearly every
+    cell a different, essentially arbitrary color: high-frequency visual
+    noise with no information content, since almost nothing actually
+    repeats. Any genome that *does* repeat, on the other hand, is
+    already a meaningful signal on its own. This highlights up to
+    ``max_highlighted`` of the most frequent repeated genomes and
+    renders every unique (unrepeated) genome the same neutral value, so
+    a real cluster is visible against a quiet background instead of
+    blending into rainbow static.
 
-    Returns (grid, num_unique_genomes).
+    Grid values: -1 = padding (when rows * cols > len(population)),
+    0 = a unique genome, 1..K = rank of a highlighted repeated genome
+    (1 = most frequent), K+1 = a repeated genome that didn't make the
+    top-K cut (still worth distinguishing from a true unique/singleton).
+
+    Returns (grid, legend); legend is a list of {"rank", "count",
+    "frequency"} dicts for the highlighted genomes, most frequent first.
     """
     if population.ndim != 2:
         raise ValueError("population must be a 2D (n_organisms, genome_length) array")
     n = population.shape[0]
-    _, inverse = np.unique(population, axis=0, return_inverse=True)
+    _, inverse, counts = np.unique(population, axis=0, return_inverse=True, return_counts=True)
     inverse = inverse.reshape(-1)
-    num_unique = int(inverse.max()) + 1 if n else 0
+
+    repeated = np.where(counts > 1)[0]
+    order = repeated[np.argsort(-counts[repeated])]
+    highlighted = order[:max_highlighted]
+    overflow = order[max_highlighted:]
+
+    rank_lookup = np.zeros(len(counts), dtype=np.int64)
+    rank_lookup[highlighted] = np.arange(1, len(highlighted) + 1)
+    rank_lookup[overflow] = max_highlighted + 1
+    values = rank_lookup[inverse]
+
+    legend = [
+        {"rank": rank, "count": int(counts[cid]), "frequency": float(counts[cid]) / n}
+        for rank, cid in enumerate(highlighted, start=1)
+    ]
 
     rows, cols = grid_shape(n)
     grid = np.full(rows * cols, -1, dtype=np.int64)
-    grid[:n] = inverse
-    return grid.reshape(rows, cols), num_unique
+    grid[:n] = values
+    return grid.reshape(rows, cols), legend
 
 
 def genome_symbols(genome: bytes) -> list[tuple[str, str]]:
