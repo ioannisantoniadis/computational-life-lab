@@ -62,6 +62,8 @@ def _init_universe(config_name: str, seed_override: int | None) -> None:
     st.session_state.scan_results = None
     st.session_state.loaded_run_info = None
     st.session_state.inspector_index = 0
+    st.session_state.auto_scan_last_result = None
+    st.session_state.auto_scan_first_detected_epoch = None
     if st.session_state.get("track_lineage"):
         recorder = LineageRecorder()
         recorder.record(st.session_state.universe)
@@ -104,6 +106,8 @@ def _load_stored_run(db_path: Path, run_id: int) -> None:
     st.session_state.scan_results = None
     st.session_state.lineage_recorder = None
     st.session_state.inspector_index = 0
+    st.session_state.auto_scan_last_result = None
+    st.session_state.auto_scan_first_detected_epoch = None
     st.session_state.loaded_run_info = {
         "db_path": str(db_path),
         "run_id": run_id,
@@ -113,6 +117,69 @@ def _load_stored_run(db_path: Path, run_id: int) -> None:
     }
 
 
+def _maybe_auto_scan(universe: BffSoupUniverse) -> None:
+    """If auto-scan is enabled and this epoch is due, run the same
+    replication-consistency check `life run --replication-scan-interval`
+    does, record the result, and flag the first epoch a candidate is
+    seen. If this session was loaded from a stored run (so a database
+    and run id are known), also persist the scan and any first-detection
+    as real events -- otherwise it's shown live but not written anywhere,
+    same as the manual "Scan for candidate replicators" section below.
+    """
+    if not st.session_state.get("auto_scan"):
+        return
+    interval = st.session_state.get("auto_scan_interval", 100)
+    if universe.epoch % interval != 0:
+        return
+
+    population_size = universe.config.population_size
+    sample_size = min(st.session_state.get("auto_scan_sample_size", 200), population_size)
+    scan_seed = universe.config.seed ^ universe.epoch
+    sample_idx = np.random.default_rng(scan_seed).choice(
+        population_size, size=sample_size, replace=False
+    )
+    scores = replication_scores(
+        universe.population[sample_idx], seed=scan_seed, max_steps=universe.config.max_steps
+    )
+    best_score = int(scores.max())
+    genome_length = universe.config.genome_length
+    label = classify(best_score, genome_length)
+    st.session_state.auto_scan_last_result = {
+        "epoch": universe.epoch,
+        "best_score": best_score,
+        "genome_length": genome_length,
+        "classification": label,
+    }
+
+    loaded_run_info = st.session_state.get("loaded_run_info")
+    if loaded_run_info is not None:
+        with RunStore(loaded_run_info["db_path"]) as store:
+            store.record_metrics(
+                loaded_run_info["run_id"],
+                universe.epoch,
+                {"best_replication_score": float(best_score)},
+            )
+            store.record_event(
+                loaded_run_info["run_id"],
+                universe.epoch,
+                "replication_scan",
+                {"best_score": best_score, "sample_size": int(sample_size), "classification": label},
+            )
+
+    if label != "no replication signal" and st.session_state.get(
+        "auto_scan_first_detected_epoch"
+    ) is None:
+        st.session_state.auto_scan_first_detected_epoch = universe.epoch
+        if loaded_run_info is not None:
+            with RunStore(loaded_run_info["db_path"]) as store:
+                store.record_event(
+                    loaded_run_info["run_id"],
+                    universe.epoch,
+                    "candidate_replicator_detected",
+                    {"best_score": best_score, "classification": label},
+                )
+
+
 def _step(num_epochs: int) -> None:
     universe: BffSoupUniverse = st.session_state.universe
     for _ in range(num_epochs):
@@ -120,6 +187,7 @@ def _step(num_epochs: int) -> None:
         recorder: LineageRecorder | None = st.session_state.get("lineage_recorder")
         if recorder is not None:
             recorder.record(universe)
+        _maybe_auto_scan(universe)
     st.session_state.history.append(compute_metrics(universe))
 
 
@@ -208,6 +276,22 @@ with st.sidebar:
     elif not track_lineage:
         st.session_state.lineage_recorder = None
 
+    st.divider()
+    auto_scan = st.checkbox("Auto-scan for replicators", key="auto_scan")
+    if auto_scan:
+        st.number_input(
+            "Scan interval (epochs)", min_value=1, value=100, step=10, key="auto_scan_interval"
+        )
+        st.number_input(
+            "Sample size", min_value=10, max_value=2000, value=200, step=10, key="auto_scan_sample_size"
+        )
+        st.caption(
+            "Runs the replication-consistency check (65 BFF executions per "
+            "candidate) automatically every N epochs during Step/Play, and "
+            "flags the first epoch a candidate replicator is seen -- same "
+            "method as `life run --replication-scan-interval`."
+        )
+
 universe: BffSoupUniverse = st.session_state.universe
 config = st.session_state.config
 
@@ -219,6 +303,17 @@ if loaded_run_info:
         f"{loaded_run_info['checkpoint_epoch']}. Stepping/playing from here continues "
         "this run forward; it does not modify the saved files."
     )
+
+if st.session_state.get("auto_scan"):
+    first_detected = st.session_state.get("auto_scan_first_detected_epoch")
+    if first_detected is not None:
+        st.success(f"Candidate replicator first detected at epoch {first_detected}.")
+    last = st.session_state.get("auto_scan_last_result")
+    if last is not None:
+        st.caption(
+            f"Last auto-scan: epoch {last['epoch']}, best score "
+            f"{last['best_score']}/{last['genome_length']} ({last['classification']})."
+        )
 
 status_cols = st.columns(4)
 status_cols[0].metric("Epoch", universe.epoch)

@@ -115,6 +115,24 @@ memory-heavy (one entry per organism ever created — see
 it on mid-run starts recording *from that point forward*; ancestry from
 before that point was never captured and can't be recovered.
 
+**Auto-scan for replicators** (sidebar, under Analysis): opt-in
+checkbox that runs the same replication-consistency check as `life run
+--replication-scan-interval` (see
+[`cli_reference.md`](cli_reference.md#life-run)) automatically every
+"scan interval" epochs while you Step or Play, instead of only finding
+out via the manual scan section further down the page. A caption below
+the "Load stored run" banner shows the most recent scan's epoch, best
+score, and classification, and a success banner appears the first time
+a candidate replicator is seen, so a multi-day run doesn't need
+constant manual checking to notice when something interesting emerges.
+If the session was loaded via "Load stored run" (so a database and run
+id are known), each scan is also persisted as a `replication_scan`
+event and the first detection as a `candidate_replicator_detected`
+event — identical to what `--db` does for the CLI — so it shows up in
+`life analyze` too; a fresh, unattached session only shows the result
+live. Interval and sample size persist across Reset the same way
+"Track lineage" does; only the last-result/first-detection state resets.
+
 ## Debugging execution by hand
 
 **Execution debugger**: pick any two organisms, concatenate their

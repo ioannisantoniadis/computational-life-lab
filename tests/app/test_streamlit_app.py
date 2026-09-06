@@ -137,6 +137,74 @@ def test_replicator_scan_runs_and_shows_results():
     assert len(at.dataframe) == 1
 
 
+def test_auto_scan_checkbox_reveals_interval_and_sample_size_inputs():
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+    assert not any(ni.key == "auto_scan_interval" for ni in at.number_input)
+
+    at.checkbox(key="auto_scan").set_value(True).run(timeout=30)
+    assert not at.exception
+    assert any(ni.key == "auto_scan_interval" for ni in at.number_input)
+    assert any(ni.key == "auto_scan_sample_size" for ni in at.number_input)
+
+
+def test_auto_scan_runs_during_step_and_shows_last_result(monkeypatch):
+    # Forces a fast, fixed score instead of relying on genuine replication
+    # emergence in one epoch -- this test is about the periodic-scan and
+    # session-state wiring, not real replication (same rationale as the
+    # CLI's equivalent test in tests/test_cli.py).
+    def fake_replication_scores(candidates, **kwargs):
+        import numpy as np
+
+        return np.zeros(candidates.shape[0], dtype=np.int64)
+
+    monkeypatch.setattr(
+        "computational_life.analysis.replication.replication_scores", fake_replication_scores
+    )
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+    at.checkbox(key="auto_scan").set_value(True).run(timeout=30)
+    at.number_input(key="auto_scan_interval").set_value(1).run(timeout=30)
+    at.number_input(key="auto_scan_sample_size").set_value(5).run(timeout=30)
+    next(ni for ni in at.number_input if ni.label == "Epochs per step").set_value(1).run(
+        timeout=30
+    )
+
+    step_button = next(b for b in at.button if b.label == "Step")
+    step_button.click().run(timeout=30)
+    assert not at.exception
+    assert any("Last auto-scan: epoch 1" in c.value for c in at.caption)
+
+
+def test_auto_scan_flags_first_candidate_detection(monkeypatch):
+    def fake_replication_scores(candidates, **kwargs):
+        import numpy as np
+
+        return np.full(candidates.shape[0], candidates.shape[1])  # perfect score every time
+
+    monkeypatch.setattr(
+        "computational_life.analysis.replication.replication_scores", fake_replication_scores
+    )
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+    at.checkbox(key="auto_scan").set_value(True).run(timeout=30)
+    at.number_input(key="auto_scan_interval").set_value(1).run(timeout=30)
+    next(ni for ni in at.number_input if ni.label == "Epochs per step").set_value(1).run(
+        timeout=30
+    )
+
+    step_button = next(b for b in at.button if b.label == "Step")
+    step_button.click().run(timeout=30)
+    assert not at.exception
+    assert any("Candidate replicator first detected at epoch 1" in s.value for s in at.success)
+
+    # Stepping again shouldn't re-flag -- only the first detection is notable.
+    step_button.click().run(timeout=30)
+    assert sum(1 for s in at.success if "first detected" in s.value) == 1
+
+
 def _create_stored_run_with_checkpoint(tmp_path) -> tuple[Path, int]:
     """Runs the real CLI to produce a genuine --db + --checkpoint-dir run,
     the same way a long overnight run would -- rather than hand-building
