@@ -274,7 +274,7 @@ with left:
     if highlight_legend:
         badges = " ".join(
             f'<span style="background-color:rgb{_HIGHLIGHT_RGB[e["rank"] - 1]}; '
-            f'color:white; padding:2px 8px; border-radius:3px; margin-right:4px; '
+            f'color:#111827; padding:2px 8px; border-radius:3px; margin-right:4px; '
             f'font-size:0.85em;">#{e["rank"]}: {e["count"]} ({e["frequency"]:.1%})</span>'
             for e in highlight_legend
         )
