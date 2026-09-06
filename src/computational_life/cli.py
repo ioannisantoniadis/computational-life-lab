@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from .experiments.base import load_bff_soup_config
-from .experiments.bff_soup import run_bff_soup
+from .experiments.bff_soup import DEFAULT_REPLICATION_SCAN_SAMPLE_SIZE, run_bff_soup
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -88,6 +88,49 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     run_id, universe.epoch, "checkpoint_saved", {"path": str(saved_path)}
                 )
 
+    # Automatic event detection: periodically scan a population sample for
+    # replication signal (same method as `life inspect --replication-score`
+    # and a sweep's end-of-run scan -- see analysis_methods.md) and flag the
+    # first epoch a candidate replicator is seen, rather than only finding
+    # out via a manual scan after the fact.
+    first_candidate_epoch = None
+    on_replication_scan = None
+    if args.replication_scan_interval:
+        from .analysis.replication import classify
+
+        def on_replication_scan(universe, scores, sample_idx) -> None:
+            nonlocal first_candidate_epoch
+            best_score = int(scores.max())
+            genome_length = config.universe.genome_length
+            label = classify(best_score, genome_length)
+            print(
+                f"epoch={universe.epoch:>8}  replication_scan  "
+                f"best_score={best_score}/{genome_length}  ({label})"
+            )
+            if store is not None:
+                store.record_metrics(
+                    run_id, universe.epoch, {"best_replication_score": float(best_score)}
+                )
+                store.record_event(
+                    run_id,
+                    universe.epoch,
+                    "replication_scan",
+                    {
+                        "best_score": best_score,
+                        "sample_size": int(len(sample_idx)),
+                        "classification": label,
+                    },
+                )
+                if label != "no replication signal" and first_candidate_epoch is None:
+                    first_candidate_epoch = universe.epoch
+                    store.record_event(
+                        run_id,
+                        universe.epoch,
+                        "candidate_replicator_detected",
+                        {"best_score": best_score, "classification": label},
+                    )
+                    print(f"*** candidate replicator detected at epoch {universe.epoch} ***")
+
     try:
         universe = run_bff_soup(
             config,
@@ -95,6 +138,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
             universe=resumed_universe,
             on_checkpoint=on_checkpoint,
             checkpoint_interval=args.checkpoint_interval,
+            on_replication_scan=on_replication_scan,
+            replication_scan_interval=args.replication_scan_interval,
+            replication_sample_size=args.replication_sample_size,
         )
     except BaseException:
         if store is not None:
@@ -299,6 +345,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1000,
         help="Epochs between periodic checkpoints (only used with --checkpoint-dir)",
+    )
+    run_parser.add_argument(
+        "--replication-scan-interval",
+        type=int,
+        default=None,
+        help="Epochs between automatic replication-consistency scans; records a "
+        "candidate_replicator_detected event the first time one is found (requires --db "
+        "to actually persist events, though the scan still prints to stdout without it)",
+    )
+    run_parser.add_argument(
+        "--replication-sample-size",
+        type=int,
+        default=DEFAULT_REPLICATION_SCAN_SAMPLE_SIZE,
+        help="Population sample size for each automatic replication scan",
     )
     run_parser.set_defaults(func=_cmd_run)
 

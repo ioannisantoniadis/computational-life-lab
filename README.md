@@ -44,10 +44,8 @@ is a DAG since every organism has two parents, so a single "founder
 color" per organism usually isn't well-defined beyond a couple of
 generations — the lineage graph for one selected organism is drawn
 instead, honestly, rather than inventing a per-organism founder color),
-automatic "candidate replicator detected" event flagging during a live
-run (detection exists but is on-demand/end-of-run only), and Phase 5
-(generic substrates beyond BFF) — deliberately deferred until the BFF
-system has been pushed further.
+and Phase 5 (generic substrates beyond BFF) — deliberately deferred
+until the BFF system has been pushed further.
 
 ## Installation
 

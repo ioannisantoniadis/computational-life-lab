@@ -10,9 +10,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import numpy as np
+
 from ..analysis import complexity, diversity, entropy
+from ..analysis.replication import replication_scores
 from ..substrates.bff.universe import BffSoupUniverse
 from .base import BffSoupExperimentConfig
+
+DEFAULT_REPLICATION_SCAN_SAMPLE_SIZE = 200
 
 
 def compute_metrics(universe: BffSoupUniverse) -> dict:
@@ -44,6 +49,9 @@ def run_bff_soup(
     universe: BffSoupUniverse | None = None,
     on_checkpoint: Callable[[BffSoupUniverse], None] | None = None,
     checkpoint_interval: int | None = None,
+    on_replication_scan: Callable[[BffSoupUniverse, np.ndarray, np.ndarray], None] | None = None,
+    replication_scan_interval: int | None = None,
+    replication_sample_size: int = DEFAULT_REPLICATION_SCAN_SAMPLE_SIZE,
 ) -> BffSoupUniverse:
     """Run the bff_soup experiment for ``config.epochs`` more epochs.
 
@@ -51,6 +59,17 @@ def run_bff_soup(
     fresh random population -- this is how resuming from a checkpoint
     works (spec section 24): load one with
     ``storage.checkpoints.load_checkpoint`` and pass it in here.
+
+    ``on_replication_scan``, if given, is called every
+    ``replication_scan_interval`` epochs with (universe, scores,
+    sample_idx) -- a real analysis.replication.replication_scores() scan
+    over a deterministic sample of the current population, exactly like
+    a sweep's end-of-run scan (see analysis_methods.md), just run
+    periodically during a single long run instead of only once at the
+    end. This is what lets a run flag "candidate replicator detected at
+    epoch N" automatically rather than only via an on-demand scan --
+    still purely observational (the callback decides what to do with the
+    result; nothing here feeds back into ``universe``).
     """
     if universe is None:
         universe = BffSoupUniverse(config.universe)
@@ -68,5 +87,20 @@ def run_bff_soup(
             and universe.epoch % checkpoint_interval == 0
         ):
             on_checkpoint(universe)
+        if (
+            on_replication_scan is not None
+            and replication_scan_interval
+            and universe.epoch % replication_scan_interval == 0
+        ):
+            population_size = config.universe.population_size
+            sample_size = min(replication_sample_size, population_size)
+            sample_rng = np.random.default_rng(config.universe.seed ^ universe.epoch)
+            sample_idx = sample_rng.choice(population_size, size=sample_size, replace=False)
+            scores = replication_scores(
+                universe.population[sample_idx],
+                seed=config.universe.seed ^ universe.epoch,
+                max_steps=config.universe.max_steps,
+            )
+            on_replication_scan(universe, scores, sample_idx)
 
     return universe

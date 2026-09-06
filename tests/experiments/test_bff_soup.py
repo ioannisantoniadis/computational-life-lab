@@ -93,3 +93,39 @@ def test_run_bff_soup_does_not_checkpoint_without_an_interval():
     checkpoints = []
     run_bff_soup(config, on_checkpoint=checkpoints.append, checkpoint_interval=None)
     assert checkpoints == []
+
+
+def test_run_bff_soup_invokes_on_replication_scan_at_configured_interval():
+    config = make_config(epochs=10, report_interval=100)
+    scan_epochs = []
+
+    def on_scan(universe, scores, sample_idx):
+        scan_epochs.append(universe.epoch)
+        assert scores.shape == sample_idx.shape
+
+    run_bff_soup(
+        config,
+        on_replication_scan=on_scan,
+        replication_scan_interval=4,
+        replication_sample_size=10,
+    )
+    assert scan_epochs == [4, 8]
+
+
+def test_run_bff_soup_does_not_scan_without_an_interval():
+    config = make_config(epochs=10)
+    calls = []
+    run_bff_soup(config, on_replication_scan=calls.append, replication_scan_interval=None)
+    assert calls == []
+
+
+def test_run_bff_soup_replication_scan_sample_size_is_capped_at_population_size():
+    config = make_config(epochs=4, report_interval=100)  # population_size=32
+    sample_sizes = []
+    run_bff_soup(
+        config,
+        on_replication_scan=lambda u, scores, idx: sample_sizes.append(len(idx)),
+        replication_scan_interval=4,
+        replication_sample_size=1000,  # larger than the population
+    )
+    assert sample_sizes == [32]

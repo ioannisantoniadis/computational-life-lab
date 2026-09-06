@@ -93,6 +93,79 @@ def _write_fast_config(path: Path) -> Path:
     return config_path
 
 
+def test_cli_replication_scan_records_periodic_events(tmp_path, capsys):
+    from computational_life.storage.database import RunStore
+
+    config_path = _write_fast_config(tmp_path)
+    db_path = tmp_path / "runs.db"
+    main(
+        [
+            "run",
+            str(config_path),
+            "--db",
+            str(db_path),
+            "--replication-scan-interval",
+            "2",
+            "--replication-sample-size",
+            "5",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "replication_scan" in out
+
+    with RunStore(db_path) as store:
+        events = store.get_events(1)
+        scan_events = [e for e in events if e["kind"] == "replication_scan"]
+        assert [e["epoch"] for e in scan_events] == [2, 4, 6]
+        history = store.get_metrics_history(1)
+        assert any("best_replication_score" in row for row in history)
+
+
+def test_cli_replication_scan_flags_first_candidate_detection(tmp_path, capsys, monkeypatch):
+    from computational_life.storage.database import RunStore
+
+    # Force a deterministic "found a candidate" result instead of relying on
+    # genuine emergence (astronomically unlikely at this toy scale/duration)
+    # -- this test is about the event-wiring logic, not real replication.
+    def fake_replication_scores(candidates, **kwargs):
+        import numpy as np
+
+        return np.full(candidates.shape[0], candidates.shape[1])  # perfect score every time
+
+    monkeypatch.setattr(
+        "computational_life.experiments.bff_soup.replication_scores", fake_replication_scores
+    )
+
+    config_path = _write_fast_config(tmp_path)
+    db_path = tmp_path / "runs.db"
+    main(
+        [
+            "run",
+            str(config_path),
+            "--db",
+            str(db_path),
+            "--replication-scan-interval",
+            "2",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "candidate replicator detected at epoch 2" in out
+
+    with RunStore(db_path) as store:
+        events = store.get_events(1)
+        detected = [e for e in events if e["kind"] == "candidate_replicator_detected"]
+        assert len(detected) == 1  # only flagged once, at the first detection
+        assert detected[0]["epoch"] == 2
+        assert detected[0]["payload"]["classification"] == "high-fidelity replicator candidate"
+
+
+def test_cli_replication_scan_without_interval_does_not_scan(tmp_path, capsys):
+    config_path = _write_fast_config(tmp_path)
+    main(["run", str(config_path)])
+    out = capsys.readouterr().out
+    assert "replication_scan" not in out
+
+
 def test_cli_save_and_resume_checkpoint(tmp_path, capsys):
     from computational_life.storage.checkpoints import load_checkpoint
 

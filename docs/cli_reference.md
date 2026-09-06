@@ -12,6 +12,7 @@ actual current flags; what follows adds the context and worked examples
 life run CONFIG.yaml [--epochs N] [--seed N] [--db PATH]
     [--resume-from PATH] [--save-checkpoint PATH]
     [--checkpoint-dir PATH] [--checkpoint-interval N]
+    [--replication-scan-interval N] [--replication-sample-size N]
 ```
 
 Runs one `bff_soup` experiment (see [`configuration.md`](configuration.md)
@@ -31,6 +32,18 @@ values without editing the file.
   fresh random population, then run `epochs` *more* epochs from there.
   Cannot be combined with `--seed` (the checkpoint's own RNG state
   governs the resumed run; a seed override would silently do nothing).
+- **`--replication-scan-interval N [--replication-sample-size N]`** —
+  every `N` epochs, run the same replication-consistency scan as
+  `life inspect --replication-score` (see
+  [`analysis_methods.md`](analysis_methods.md#replication-detection-analysisreplicationpy))
+  over a sample of the population (default sample size 200), print the
+  result, and record it as a `replication_scan` event. The first time a
+  scan crosses the "candidate replicator" threshold, an additional
+  `candidate_replicator_detected` event is recorded — this is what
+  automatically flags "first candidate replicator detected at epoch N"
+  instead of only finding out via a manual scan afterward. Prints to
+  stdout regardless of `--db`; only persisted as events/metrics when
+  `--db` is set.
 
 When `--db` is set, checkpoint paths from `--checkpoint-dir` and
 `--save-checkpoint` are both namespaced under `<path>/run_<id>/` so two
@@ -42,7 +55,8 @@ there's no run id, so paths are used exactly as given.
 ```bash
 life run experiments/configs/bff_dev.yaml --epochs 200
 life run experiments/configs/bff_baseline.yaml --db runs/baseline.db \
-    --checkpoint-dir runs/baseline_checkpoints --checkpoint-interval 500
+    --checkpoint-dir runs/baseline_checkpoints --checkpoint-interval 500 \
+    --replication-scan-interval 500
 life run experiments/configs/bff_dev.yaml --resume-from runs/baseline_checkpoints/run_1/epoch_0000000500 --epochs 500
 ```
 
