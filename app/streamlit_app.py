@@ -534,6 +534,70 @@ if scan_results is not None:
             st.session_state.inspector_index = jump_target
             st.rerun()
 
+st.divider()
+st.subheader("Compare stored runs")
+st.caption(
+    "Overlay a metric's history across several stored runs -- e.g. different "
+    "seeds, or points from the same sweep -- without leaving the dashboard "
+    "(spec section 26)."
+)
+compare_discovered_dbs = (
+    sorted(str(p.relative_to(REPO_ROOT)) for p in RUNS_DIR.glob("*.db")) if RUNS_DIR.is_dir() else []
+)
+compare_db_text = st.text_input(
+    "Database path",
+    value=compare_discovered_dbs[0] if compare_discovered_dbs else "",
+    key="compare_db_path",
+)
+compare_db_path = Path(compare_db_text) if compare_db_text.strip() else None
+if compare_db_path is not None and compare_db_path.is_file():
+    with RunStore(compare_db_path) as compare_store:
+        comparable_runs = compare_store.list_runs()
+    if not comparable_runs:
+        st.caption("This database has no runs.")
+    else:
+        compare_labels = {
+            f"#{r['id']} {r['experiment_name']} (seed={r['seed']}, "
+            f"epoch={r['final_epoch']}, {r['status']})": r["id"]
+            for r in comparable_runs
+        }
+        selected_run_labels = st.multiselect(
+            "Runs to compare", list(compare_labels.keys()), key="compare_run_labels"
+        )
+        metric_choice = st.selectbox(
+            "Metric",
+            [
+                "unique_genomes",
+                "dominant_genome_frequency",
+                "simpson_diversity",
+                "genome_entropy_bits",
+                "byte_entropy_bits",
+                "instruction_entropy_bits",
+                "compressed_bits_per_byte",
+                "structural_redundancy_bits",
+                "best_replication_score",
+            ],
+            key="compare_metric",
+        )
+        if selected_run_labels:
+            fig_compare = go.Figure()
+            with RunStore(compare_db_path) as compare_store:
+                for label in selected_run_labels:
+                    run_history = compare_store.get_metrics_history(compare_labels[label])
+                    run_df = pd.DataFrame(run_history)
+                    if metric_choice in run_df.columns:
+                        fig_compare.add_scatter(
+                            x=run_df["epoch"], y=run_df[metric_choice], name=label, mode="lines"
+                        )
+            fig_compare.update_layout(
+                title=f"{metric_choice} across selected runs",
+                xaxis_title="Epoch",
+                yaxis_title=metric_choice,
+            )
+            st.plotly_chart(fig_compare, width="stretch")
+elif compare_db_path is not None:
+    st.caption("No database found at that path.")
+
 if st.session_state.get("playing"):
     _step(int(epochs_per_step))
     time.sleep(0.05)

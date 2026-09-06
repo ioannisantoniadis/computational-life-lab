@@ -234,6 +234,54 @@ def test_load_stored_run_without_checkpoint_shows_error(tmp_path):
     assert any("no saved checkpoint" in e.value for e in at.error)
 
 
+def _create_two_stored_runs(tmp_path) -> Path:
+    from computational_life.cli import main
+
+    config_path = tmp_path / "fast.yaml"
+    config_path.write_text(
+        "experiment: bff_soup\n"
+        "name: compare_test\n"
+        "seed: 1\n"
+        "population:\n  size: 16\n  genome_length: 8\n"
+        "execution:\n  max_steps: 100\n"
+        "run:\n  epochs: 4\n  report_interval: 2\n"
+    )
+    db_path = tmp_path / "compare.db"
+    main(["run", str(config_path), "--db", str(db_path)])
+    main(["run", str(config_path), "--seed", "2", "--db", str(db_path)])
+    return db_path
+
+
+def test_compare_runs_populates_run_selector(tmp_path, capsys):
+    db_path = _create_two_stored_runs(tmp_path)
+    capsys.readouterr()
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+    at.text_input(key="compare_db_path").set_value(str(db_path)).run(timeout=30)
+    assert not at.exception
+
+    run_multiselect = at.multiselect(key="compare_run_labels")
+    assert len(run_multiselect.options) == 2
+
+
+def test_compare_runs_selecting_runs_renders_without_exception(tmp_path, capsys):
+    db_path = _create_two_stored_runs(tmp_path)
+    capsys.readouterr()
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+    at.text_input(key="compare_db_path").set_value(str(db_path)).run(timeout=30)
+
+    run_multiselect = at.multiselect(key="compare_run_labels")
+    run_multiselect.set_value(run_multiselect.options).run(timeout=30)
+    assert not at.exception
+
+    metric_select = at.selectbox(key="compare_metric")
+    metric_select.select("unique_genomes").run(timeout=30)
+    assert not at.exception
+
+
 def test_reset_reinitializes_deterministically():
     at = AppTest.from_file(str(APP_PATH))
     at.run(timeout=30)
