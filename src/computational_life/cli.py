@@ -175,6 +175,53 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_inspect(args: argparse.Namespace) -> int:
+    from .storage.checkpoints import load_checkpoint
+    from .storage.database import RunStore
+
+    with RunStore(args.db) as store:
+        run = store.get_run(args.run_id)
+        events = store.get_events(args.run_id)
+
+    checkpoint_events = [e for e in events if e["kind"] == "checkpoint_saved"]
+    if not checkpoint_events:
+        print(
+            f"Run {args.run_id} ({run['experiment_name']}) has no saved checkpoint -- "
+            "nothing to inspect. Re-run with --checkpoint-dir or --save-checkpoint."
+        )
+        return 1
+
+    latest = max(checkpoint_events, key=lambda e: e["epoch"])
+    universe = load_checkpoint(latest["payload"]["path"])
+
+    if not (0 <= args.organism < universe.config.population_size):
+        print(
+            f"Organism index {args.organism} out of range "
+            f"(population size is {universe.config.population_size})"
+        )
+        return 1
+
+    organism = universe.get_organism(args.organism)
+    print(f"Run {args.run_id} ({run['experiment_name']}), checkpoint at epoch {universe.epoch}")
+    print(f"Organism index {args.organism}:")
+    print(f"  organism_id: {organism.organism_id}")
+    print(f"  generation: {organism.generation}")
+    print(f"  birth_epoch: {organism.birth_epoch}")
+    print(f"  age (epochs): {universe.epoch - organism.birth_epoch}")
+    print(f"  parent_ids: {organism.parent_ids}")
+    print(f"  genome ({len(organism.genome)} bytes, hex): {organism.genome.hex()}")
+
+    if args.replication_score:
+        from .analysis.replication import classify, replication_score
+
+        score = replication_score(
+            organism.genome, seed=universe.config.seed, max_steps=universe.config.max_steps
+        )
+        label = classify(score, universe.config.genome_length)
+        print(f"  replication score: {score}/{universe.config.genome_length} ({label})")
+    return 0
+
+
 def _cmd_sweep(args: argparse.Namespace) -> int:
     from .experiments.sweep import load_sweep_config, run_sweep
     from .storage.database import RunStore
@@ -266,6 +313,21 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("run_id", type=int, help="Run id to summarize")
     analyze_parser.add_argument("--db", required=True, help="SQLite database path to read from")
     analyze_parser.set_defaults(func=_cmd_analyze)
+
+    inspect_parser = subparsers.add_parser(
+        "inspect", help="Inspect one organism from a run's latest saved checkpoint"
+    )
+    inspect_parser.add_argument("run_id", type=int, help="Run id to inspect")
+    inspect_parser.add_argument("--db", required=True, help="SQLite database path to read from")
+    inspect_parser.add_argument(
+        "--organism", type=int, required=True, help="Population index (0-based) to inspect"
+    )
+    inspect_parser.add_argument(
+        "--replication-score",
+        action="store_true",
+        help="Also compute the replication-consistency score (13x5 BFF executions, not free)",
+    )
+    inspect_parser.set_defaults(func=_cmd_inspect)
 
     sweep_parser = subparsers.add_parser(
         "sweep", help="Run a parameter sweep (many population/mutation/seed combinations)"

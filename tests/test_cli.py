@@ -234,6 +234,93 @@ def test_cli_list_runs_filters_by_experiment(tmp_path, capsys):
     assert "No runs found" in out
 
 
+def test_cli_inspect_prints_organism_details(tmp_path, capsys):
+    config_path = _write_fast_config(tmp_path)
+    db_path = tmp_path / "runs.db"
+    checkpoint_dir = tmp_path / "checkpoints"
+    main(
+        [
+            "run",
+            str(config_path),
+            "--db",
+            str(db_path),
+            "--checkpoint-dir",
+            str(checkpoint_dir),
+            "--checkpoint-interval",
+            "2",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(["inspect", "1", "--db", str(db_path), "--organism", "3"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Organism index 3" in out
+    assert "organism_id:" in out
+    assert "genome (8 bytes, hex):" in out
+    assert "checkpoint at epoch 6" in out
+
+
+def test_cli_inspect_with_replication_score(tmp_path, capsys):
+    config_path = _write_fast_config(tmp_path)
+    db_path = tmp_path / "runs.db"
+    checkpoint_dir = tmp_path / "checkpoints"
+    main(
+        [
+            "run",
+            str(config_path),
+            "--db",
+            str(db_path),
+            "--checkpoint-dir",
+            str(checkpoint_dir),
+            "--checkpoint-interval",
+            "2",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(
+        ["inspect", "1", "--db", str(db_path), "--organism", "0", "--replication-score"]
+    )
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "replication score:" in out
+
+
+def test_cli_inspect_without_checkpoint_returns_error(tmp_path, capsys):
+    config_path = _write_fast_config(tmp_path)
+    db_path = tmp_path / "runs.db"
+    main(["run", str(config_path), "--db", str(db_path)])  # no --checkpoint-dir
+    capsys.readouterr()
+
+    exit_code = main(["inspect", "1", "--db", str(db_path), "--organism", "0"])
+    assert exit_code == 1
+    assert "no saved checkpoint" in capsys.readouterr().out
+
+
+def test_cli_inspect_rejects_out_of_range_organism(tmp_path, capsys):
+    config_path = _write_fast_config(tmp_path)
+    db_path = tmp_path / "runs.db"
+    checkpoint_dir = tmp_path / "checkpoints"
+    main(
+        [
+            "run",
+            str(config_path),
+            "--db",
+            str(db_path),
+            "--checkpoint-dir",
+            str(checkpoint_dir),
+            "--checkpoint-interval",
+            "2",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(["inspect", "1", "--db", str(db_path), "--organism", "999"])
+    assert exit_code == 1
+    assert "out of range" in capsys.readouterr().out
+
+
 def _write_fast_sweep_config(path: Path) -> Path:
     config_path = path / "fast_sweep.yaml"
     config_path.write_text(
