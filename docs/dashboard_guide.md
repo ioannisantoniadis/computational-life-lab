@@ -4,6 +4,10 @@
 streamlit run app/streamlit_app.py
 ```
 
+<p align="center">
+  <img src="images/dashboard_screenshot.png" alt="Population grid and status metrics in the Streamlit dashboard" width="90%">
+</p>
+
 The dashboard (`app/streamlit_app.py`, with pure presentation helpers
 in `app/rendering.py`) calls the exact same engine as the CLI —
 `BffSoupUniverse`, `compute_metrics`, and everything under

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/hero.png" alt="Computational Life Lab" width="100%">
+</p>
+
 # Computational Life Lab
 
 An experimental laboratory for studying emergence, evolution, and
@@ -75,6 +79,21 @@ Every run is deterministic given its configuration and seed:
 life run experiments/configs/bff_dev.yaml --epochs 20 --seed 1  # always identical output
 life run experiments/configs/bff_dev.yaml --epochs 20 --seed 1
 ```
+
+## The dashboard
+
+`streamlit run app/streamlit_app.py` calls the exact same engine as the
+CLI — no separate simulation logic — to watch a run live, inspect
+individual organisms, or resume a multi-day run from its last
+checkpoint. See [`docs/dashboard_guide.md`](docs/dashboard_guide.md)
+for a full walkthrough of every section.
+
+<p align="center">
+  <img src="docs/images/dashboard_screenshot.png" alt="Population grid and status metrics in the Streamlit dashboard" width="90%">
+</p>
+<p align="center">
+  <img src="docs/images/dashboard_diversity_screenshot.png" alt="Diversity, entropy, and complexity charts in the Streamlit dashboard" width="90%">
+</p>
 
 ## Documentation
 
