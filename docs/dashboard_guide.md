@@ -137,6 +137,30 @@ event — identical to what `--db` does for the CLI — so it shows up in
 live. Interval and sample size persist across Reset the same way
 "Track lineage" does; only the last-result/first-detection state resets.
 
+**Auto-checkpoint to disk (recover after disconnect)** (sidebar, under
+Analysis): opt-in checkbox that saves a checkpoint every "checkpoint
+interval" epochs while you Step or Play — the dashboard's own
+equivalent of `life run --db --checkpoint-dir --checkpoint-interval`
+(see [`cli_reference.md`](cli_reference.md#life-run)).
+
+This exists because a run started via "Reset / (Re)initialize" lives
+*only* in this browser session's memory — nothing is written to disk
+unless you turn this on. If that session is ever lost (a closed tab,
+an overnight disconnect, the browser discarding an inactive tab to
+save memory), the run is gone with no way back, even though the
+dashboard's own server process may still be running — there is simply
+no durable copy of the state anywhere. With auto-checkpoint on,
+reloading the dashboard after a lost session and using "Load stored
+run" above resumes from the last checkpoint instead of starting over.
+
+If this session was itself loaded via "Load stored run", checkpoints
+continue into that run's *existing* database and checkpoint directory
+(so `life analyze`/`life list-runs` on the original `--db` see the
+dashboard's checkpoints too); otherwise a new database is created at
+`runs/dashboard_autosave.db`, auto-discovered by "Load stored run"
+after a reload — the same discovery mechanism, not a separate recovery
+path. A caption shows the most recent checkpoint's epoch and database.
+
 ## Debugging execution by hand
 
 **Execution debugger**: pick any two organisms, concatenate their

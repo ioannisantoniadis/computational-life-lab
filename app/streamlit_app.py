@@ -31,7 +31,7 @@ from computational_life.analysis.lineage import LineageRecorder
 from computational_life.analysis.replication import classify, replication_score, replication_scores
 from computational_life.experiments.base import BffSoupExperimentConfig, load_bff_soup_config
 from computational_life.experiments.bff_soup import compute_metrics
-from computational_life.storage.checkpoints import load_checkpoint
+from computational_life.storage.checkpoints import checkpoint_file_path, load_checkpoint, save_checkpoint
 from computational_life.storage.database import RunStore
 from computational_life.substrates.bff.interpreter import BffInterpreter
 from computational_life.substrates.bff.universe import BffSoupUniverse
@@ -56,6 +56,7 @@ def _init_universe(config_name: str, seed_override: int | None) -> None:
             config, universe=dataclasses.replace(config.universe, seed=seed_override)
         )
     st.session_state.config = config
+    st.session_state.config_name = config_name
     st.session_state.universe = BffSoupUniverse(config.universe)
     st.session_state.history = [compute_metrics(st.session_state.universe)]
     st.session_state.playing = False
@@ -64,6 +65,8 @@ def _init_universe(config_name: str, seed_override: int | None) -> None:
     st.session_state.inspector_index = 0
     st.session_state.auto_scan_last_result = None
     st.session_state.auto_scan_first_detected_epoch = None
+    st.session_state.auto_checkpoint_run_info = None
+    st.session_state.auto_checkpoint_last_epoch = None
     if st.session_state.get("track_lineage"):
         recorder = LineageRecorder()
         recorder.record(st.session_state.universe)
@@ -108,6 +111,8 @@ def _load_stored_run(db_path: Path, run_id: int) -> None:
     st.session_state.inspector_index = 0
     st.session_state.auto_scan_last_result = None
     st.session_state.auto_scan_first_detected_epoch = None
+    st.session_state.auto_checkpoint_run_info = None
+    st.session_state.auto_checkpoint_last_epoch = None
     st.session_state.loaded_run_info = {
         "db_path": str(db_path),
         "run_id": run_id,
@@ -180,6 +185,66 @@ def _maybe_auto_scan(universe: BffSoupUniverse) -> None:
                 )
 
 
+def _maybe_auto_checkpoint(universe: BffSoupUniverse) -> None:
+    """If auto-checkpoint is enabled and this epoch is due, save a
+    checkpoint + a `checkpoint_saved` event -- the dashboard's own
+    equivalent of `life run --db --checkpoint-dir --checkpoint-interval`.
+
+    A run started here (Reset / (Re)initialize, not loaded from a stored
+    run) lives only in this browser session's memory; if that session is
+    ever lost -- a closed tab, an overnight disconnect -- there is
+    otherwise no way to get it back, since nothing was ever written to
+    disk. If this session was loaded via "Load stored run", checkpoints
+    continue into that run's existing database and checkpoint directory
+    (derived from its latest checkpoint's own path) so they interleave
+    naturally with whatever `life run` already saved. Otherwise a new
+    database is created under runs/, auto-discoverable by "Load stored
+    run" after a reload -- the write side of this feature deliberately
+    reuses that existing read path rather than inventing a second one.
+    """
+    if not st.session_state.get("auto_checkpoint"):
+        return
+    interval = st.session_state.get("auto_checkpoint_interval", 500)
+    if universe.epoch == 0 or universe.epoch % interval != 0:
+        return
+
+    loaded_run_info = st.session_state.get("loaded_run_info")
+    if loaded_run_info is not None:
+        db_path = Path(loaded_run_info["db_path"])
+        run_id = loaded_run_info["run_id"]
+        checkpoint_dir = Path(loaded_run_info["checkpoint_path"]).parent
+    else:
+        autosave = st.session_state.get("auto_checkpoint_run_info")
+        if autosave is None:
+            db_path = RUNS_DIR / "dashboard_autosave.db"
+            config_name = st.session_state.get("config_name", "unknown.yaml")
+            with RunStore(db_path) as store:
+                run_id = store.start_run(
+                    experiment_name=st.session_state.config.name,
+                    config_text=(CONFIGS_DIR / config_name).read_text(),
+                    seed=universe.config.seed,
+                )
+            checkpoint_dir = RUNS_DIR / "dashboard_checkpoints" / f"run_{run_id}"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            autosave = {
+                "db_path": str(db_path),
+                "run_id": run_id,
+                "checkpoint_dir": str(checkpoint_dir),
+            }
+            st.session_state.auto_checkpoint_run_info = autosave
+        db_path = Path(autosave["db_path"])
+        run_id = autosave["run_id"]
+        checkpoint_dir = Path(autosave["checkpoint_dir"])
+
+    checkpoint_path = checkpoint_dir / f"epoch_{universe.epoch:010d}"
+    save_checkpoint(universe, checkpoint_path)
+    saved_path = checkpoint_file_path(checkpoint_path)
+    with RunStore(db_path) as store:
+        store.record_metrics(run_id, universe.epoch, compute_metrics(universe))
+        store.record_event(run_id, universe.epoch, "checkpoint_saved", {"path": str(saved_path)})
+    st.session_state.auto_checkpoint_last_epoch = universe.epoch
+
+
 def _step(num_epochs: int) -> None:
     universe: BffSoupUniverse = st.session_state.universe
     for _ in range(num_epochs):
@@ -188,6 +253,7 @@ def _step(num_epochs: int) -> None:
         if recorder is not None:
             recorder.record(universe)
         _maybe_auto_scan(universe)
+        _maybe_auto_checkpoint(universe)
     st.session_state.history.append(compute_metrics(universe))
 
 
@@ -292,6 +358,31 @@ with st.sidebar:
             "method as `life run --replication-scan-interval`."
         )
 
+    st.divider()
+    auto_checkpoint = st.checkbox(
+        "Auto-checkpoint to disk (recover after disconnect)", key="auto_checkpoint"
+    )
+    if auto_checkpoint:
+        st.number_input(
+            "Checkpoint interval (epochs)",
+            min_value=10,
+            value=500,
+            step=50,
+            key="auto_checkpoint_interval",
+        )
+        st.caption(
+            "Saves a checkpoint + `checkpoint_saved` event every N epochs "
+            "during Step/Play -- same as `life run --db --checkpoint-dir "
+            "--checkpoint-interval`. A run started here otherwise lives "
+            "only in this browser session's memory; if that session is "
+            "ever lost (closed tab, disconnect overnight, ...), the run "
+            "is gone with no way back. With this on, reload the dashboard "
+            "and use \"Load stored run\" above to resume from the last "
+            "checkpoint instead. Writes to this run's existing database "
+            "if loaded via \"Load stored run\", otherwise creates "
+            "`runs/dashboard_autosave.db`."
+        )
+
 universe: BffSoupUniverse = st.session_state.universe
 config = st.session_state.config
 
@@ -314,6 +405,13 @@ if st.session_state.get("auto_scan"):
             f"Last auto-scan: epoch {last['epoch']}, best score "
             f"{last['best_score']}/{last['genome_length']} ({last['classification']})."
         )
+
+if st.session_state.get("auto_checkpoint"):
+    last_checkpoint_epoch = st.session_state.get("auto_checkpoint_last_epoch")
+    if last_checkpoint_epoch is not None:
+        autosave = st.session_state.get("auto_checkpoint_run_info")
+        checkpoint_db = loaded_run_info["db_path"] if loaded_run_info else autosave["db_path"]
+        st.caption(f"Last auto-checkpoint: epoch {last_checkpoint_epoch} (saved to `{checkpoint_db}`).")
 
 status_cols = st.columns(4)
 status_cols[0].metric("Epoch", universe.epoch)

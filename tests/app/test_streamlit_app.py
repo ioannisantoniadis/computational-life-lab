@@ -282,6 +282,57 @@ def test_load_stored_run_can_be_resumed_by_stepping(tmp_path, capsys):
     assert epoch_metric.value == "9"  # 6 (loaded) + 3 more
 
 
+def test_auto_checkpoint_checkbox_reveals_interval_input():
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+    assert not any(ni.key == "auto_checkpoint_interval" for ni in at.number_input)
+
+    at.checkbox(key="auto_checkpoint").set_value(True).run(timeout=30)
+    assert not at.exception
+    assert any(ni.key == "auto_checkpoint_interval" for ni in at.number_input)
+
+
+def test_auto_checkpoint_continues_a_loaded_runs_own_database(tmp_path, capsys):
+    # Exercises the "session was loaded via Load stored run" branch of
+    # _maybe_auto_checkpoint -- it should write into that same run's
+    # existing database and checkpoint directory rather than creating a
+    # separate one, so `life analyze`/`life list-runs` on the original
+    # --db see the dashboard's checkpoints too.
+    from computational_life.storage.database import RunStore
+
+    db_path, run_id = _create_stored_run_with_checkpoint(tmp_path)
+    capsys.readouterr()
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+    at.text_input(key="load_db_path").set_value(str(db_path)).run(timeout=30)
+    run_select = at.selectbox(key="load_run_label")
+    run_select.select(run_select.options[0]).run(timeout=30)
+    next(b for b in at.button if b.label == "Load this run").click().run(timeout=30)
+
+    at.checkbox(key="auto_checkpoint").set_value(True).run(timeout=30)
+    at.number_input(key="auto_checkpoint_interval").set_value(10).run(timeout=30)
+    next(ni for ni in at.number_input if ni.label == "Epochs per step").set_value(4).run(
+        timeout=30
+    )
+
+    next(b for b in at.button if b.label == "Step").click().run(timeout=30)
+    assert not at.exception
+    # Loaded at epoch 6 (see _create_stored_run_with_checkpoint), +4 more = 10,
+    # which is a multiple of the interval, so a checkpoint should fire.
+    assert any("Last auto-checkpoint: epoch 10" in c.value for c in at.caption)
+
+    with RunStore(db_path) as store:
+        events = store.get_events(run_id)
+    checkpoint_events = [e for e in events if e["kind"] == "checkpoint_saved"]
+    new_event = next(e for e in checkpoint_events if e["epoch"] == 10)
+    saved_path = Path(new_event["payload"]["path"])
+    assert saved_path.exists()
+    # Continues into the same run's own checkpoint directory, not a
+    # separate one -- the original CLI run's checkpoints live there too.
+    assert saved_path.parent == (tmp_path / "checkpoints" / f"run_{run_id}")
+
+
 def test_load_stored_run_without_checkpoint_shows_error(tmp_path):
     from computational_life.cli import main
 
