@@ -10,7 +10,10 @@ config and seed produce identical trajectories (spec section 3.4).
 
 from __future__ import annotations
 
+import os
+import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -38,13 +41,64 @@ from computational_life.substrates.bff.universe import BffSoupUniverse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIGS_DIR = REPO_ROOT / "experiments" / "configs"
-RUNS_DIR = REPO_ROOT / "runs"
+# Overridable via env var so tests (which now trigger real writes on every
+# run -- see _register_new_run) can redirect this to a tmp directory
+# instead of polluting the real project's runs/ folder.
+RUNS_DIR = Path(os.environ.get("COMPUTATIONAL_LIFE_RUNS_DIR", str(REPO_ROOT / "runs")))
+# Every run started from the dashboard (not loaded from an existing --db
+# run) is registered here immediately, the same way `life run --db ...`
+# always registers a run up front -- so a dashboard run has the same
+# run_id/database/checkpoint durability guarantees as a CLI run from the
+# moment it starts, not only once some opt-in feature is switched on.
+DASHBOARD_RUNS_DB = RUNS_DIR / "dashboard_runs.db"
+DEFAULT_CHECKPOINT_INTERVAL = 500
 
 st.set_page_config(page_title="Computational Life Lab", layout="wide")
 
 
 def _available_configs() -> list[str]:
     return sorted(p.name for p in CONFIGS_DIR.glob("*.yaml"))
+
+
+def _display_path(path: Path) -> str:
+    """A path for display/storage that's always usable to reopen the
+    file later, regardless of whether RUNS_DIR happens to live inside
+    the repo (the normal case) or was redirected elsewhere via
+    COMPUTATIONAL_LIFE_RUNS_DIR (e.g. in tests) -- Path.relative_to
+    raises if the two aren't nested, so this falls back to the
+    absolute path rather than letting that break run discovery.
+    """
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _register_new_run(config: BffSoupExperimentConfig, config_name: str) -> dict:
+    """Register a freshly (re)initialized run with the dashboard's own
+    run database, exactly as `life run --db ...` registers a run before
+    its first epoch -- so a dashboard-triggered run has a real run_id
+    and a place to persist to from the very start, not only once you
+    happen to load it from an existing CLI run.
+    """
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    with RunStore(DASHBOARD_RUNS_DB) as store:
+        run_id = store.start_run(
+            experiment_name=config.name,
+            config_text=(CONFIGS_DIR / config_name).read_text(),
+            seed=config.universe.seed,
+        )
+    checkpoint_dir = RUNS_DIR / "dashboard_checkpoints" / f"run_{run_id}"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "db_path": str(DASHBOARD_RUNS_DB),
+        "run_id": run_id,
+        "experiment_name": config.name,
+        "checkpoint_dir": str(checkpoint_dir),
+        "checkpoint_epoch": None,
+        "checkpoint_path": None,
+        "resumed_from_epoch": None,
+    }
 
 
 def _init_universe(config_name: str, seed_override: int | None) -> None:
@@ -61,12 +115,10 @@ def _init_universe(config_name: str, seed_override: int | None) -> None:
     st.session_state.history = [compute_metrics(st.session_state.universe)]
     st.session_state.playing = False
     st.session_state.scan_results = None
-    st.session_state.loaded_run_info = None
     st.session_state.inspector_index = 0
     st.session_state.auto_scan_last_result = None
     st.session_state.auto_scan_first_detected_epoch = None
-    st.session_state.auto_checkpoint_run_info = None
-    st.session_state.auto_checkpoint_last_epoch = None
+    st.session_state.loaded_run_info = _register_new_run(config, config_name)
     if st.session_state.get("track_lineage"):
         recorder = LineageRecorder()
         recorder.record(st.session_state.universe)
@@ -111,25 +163,50 @@ def _load_stored_run(db_path: Path, run_id: int) -> None:
     st.session_state.inspector_index = 0
     st.session_state.auto_scan_last_result = None
     st.session_state.auto_scan_first_detected_epoch = None
-    st.session_state.auto_checkpoint_run_info = None
-    st.session_state.auto_checkpoint_last_epoch = None
     st.session_state.loaded_run_info = {
         "db_path": str(db_path),
         "run_id": run_id,
         "experiment_name": run["experiment_name"],
+        "checkpoint_dir": str(Path(latest["payload"]["path"]).parent),
         "checkpoint_epoch": latest["epoch"],
         "checkpoint_path": latest["payload"]["path"],
+        "resumed_from_epoch": latest["epoch"],
     }
+
+
+def _discover_all_runs() -> list[dict]:
+    """Every run row across every `runs/*.db` file, each tagged with its
+    source database path and its current epoch -- so every run this
+    project has ever produced, dashboard or `life run`/`life sweep`
+    alike, can be browsed and loaded from one place without first
+    having to know (or guess) which database file it lives in.
+    """
+    if not RUNS_DIR.is_dir():
+        return []
+    rows: list[dict] = []
+    for db_file in sorted(RUNS_DIR.glob("*.db")):
+        try:
+            with RunStore(db_file) as store:
+                runs = store.list_runs()
+                for run in runs:
+                    run["db_path"] = _display_path(db_file)
+                    latest = store.latest_metrics(run["id"])
+                    run["current_epoch"] = latest["epoch"] if latest else run["final_epoch"]
+        except sqlite3.DatabaseError:
+            continue  # not a run database (or a stray/corrupt file under runs/)
+        rows.extend(runs)
+    rows.sort(key=lambda r: r["started_at"], reverse=True)
+    return rows
 
 
 def _maybe_auto_scan(universe: BffSoupUniverse) -> None:
     """If auto-scan is enabled and this epoch is due, run the same
     replication-consistency check `life run --replication-scan-interval`
     does, record the result, and flag the first epoch a candidate is
-    seen. If this session was loaded from a stored run (so a database
-    and run id are known), also persist the scan and any first-detection
-    as real events -- otherwise it's shown live but not written anywhere,
-    same as the manual "Scan for candidate replicators" section below.
+    seen. Every session now has a real run_id/database (see
+    _register_new_run/_load_stored_run), so the scan and any
+    first-detection are always persisted as real events, the same as
+    the CLI does when `--db` is set.
     """
     if not st.session_state.get("auto_scan"):
         return
@@ -156,93 +233,56 @@ def _maybe_auto_scan(universe: BffSoupUniverse) -> None:
         "classification": label,
     }
 
-    loaded_run_info = st.session_state.get("loaded_run_info")
-    if loaded_run_info is not None:
-        with RunStore(loaded_run_info["db_path"]) as store:
-            store.record_metrics(
-                loaded_run_info["run_id"],
-                universe.epoch,
-                {"best_replication_score": float(best_score)},
-            )
+    run_info = st.session_state.loaded_run_info
+    with RunStore(run_info["db_path"]) as store:
+        store.record_metrics(
+            run_info["run_id"], universe.epoch, {"best_replication_score": float(best_score)}
+        )
+        store.record_event(
+            run_info["run_id"],
+            universe.epoch,
+            "replication_scan",
+            {"best_score": best_score, "sample_size": int(sample_size), "classification": label},
+        )
+
+        if label != "no replication signal" and st.session_state.get(
+            "auto_scan_first_detected_epoch"
+        ) is None:
+            st.session_state.auto_scan_first_detected_epoch = universe.epoch
             store.record_event(
-                loaded_run_info["run_id"],
+                run_info["run_id"],
                 universe.epoch,
-                "replication_scan",
-                {"best_score": best_score, "sample_size": int(sample_size), "classification": label},
+                "candidate_replicator_detected",
+                {"best_score": best_score, "classification": label},
             )
 
-    if label != "no replication signal" and st.session_state.get(
-        "auto_scan_first_detected_epoch"
-    ) is None:
-        st.session_state.auto_scan_first_detected_epoch = universe.epoch
-        if loaded_run_info is not None:
-            with RunStore(loaded_run_info["db_path"]) as store:
-                store.record_event(
-                    loaded_run_info["run_id"],
-                    universe.epoch,
-                    "candidate_replicator_detected",
-                    {"best_score": best_score, "classification": label},
-                )
 
-
-def _maybe_auto_checkpoint(universe: BffSoupUniverse) -> None:
-    """If auto-checkpoint is enabled and this epoch is due, save a
-    checkpoint + a `checkpoint_saved` event -- the dashboard's own
-    equivalent of `life run --db --checkpoint-dir --checkpoint-interval`.
-
-    A run started here (Reset / (Re)initialize, not loaded from a stored
-    run) lives only in this browser session's memory; if that session is
-    ever lost -- a closed tab, an overnight disconnect -- there is
-    otherwise no way to get it back, since nothing was ever written to
-    disk. If this session was loaded via "Load stored run", checkpoints
-    continue into that run's existing database and checkpoint directory
-    (derived from its latest checkpoint's own path) so they interleave
-    naturally with whatever `life run` already saved. Otherwise a new
-    database is created under runs/, auto-discoverable by "Load stored
-    run" after a reload -- the write side of this feature deliberately
-    reuses that existing read path rather than inventing a second one.
+def _maybe_checkpoint(universe: BffSoupUniverse) -> None:
+    """Every `checkpoint_interval` epochs, save a checkpoint and a
+    `checkpoint_saved` event into this run's own database -- the
+    dashboard's own equivalent of `life run --db --checkpoint-dir
+    --checkpoint-interval`. Always on, not opt-in: a run started from
+    the dashboard now has the same durability guarantees as one started
+    from the CLI, so it survives a lost browser session (closed tab, an
+    inactive tab discarded overnight, ...) instead of only ever existing
+    in that session's memory.
     """
-    if not st.session_state.get("auto_checkpoint"):
-        return
-    interval = st.session_state.get("auto_checkpoint_interval", 500)
+    interval = st.session_state.get("checkpoint_interval", DEFAULT_CHECKPOINT_INTERVAL)
     if universe.epoch == 0 or universe.epoch % interval != 0:
         return
 
-    loaded_run_info = st.session_state.get("loaded_run_info")
-    if loaded_run_info is not None:
-        db_path = Path(loaded_run_info["db_path"])
-        run_id = loaded_run_info["run_id"]
-        checkpoint_dir = Path(loaded_run_info["checkpoint_path"]).parent
-    else:
-        autosave = st.session_state.get("auto_checkpoint_run_info")
-        if autosave is None:
-            db_path = RUNS_DIR / "dashboard_autosave.db"
-            config_name = st.session_state.get("config_name", "unknown.yaml")
-            with RunStore(db_path) as store:
-                run_id = store.start_run(
-                    experiment_name=st.session_state.config.name,
-                    config_text=(CONFIGS_DIR / config_name).read_text(),
-                    seed=universe.config.seed,
-                )
-            checkpoint_dir = RUNS_DIR / "dashboard_checkpoints" / f"run_{run_id}"
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            autosave = {
-                "db_path": str(db_path),
-                "run_id": run_id,
-                "checkpoint_dir": str(checkpoint_dir),
-            }
-            st.session_state.auto_checkpoint_run_info = autosave
-        db_path = Path(autosave["db_path"])
-        run_id = autosave["run_id"]
-        checkpoint_dir = Path(autosave["checkpoint_dir"])
-
+    run_info = st.session_state.loaded_run_info
+    checkpoint_dir = Path(run_info["checkpoint_dir"])
     checkpoint_path = checkpoint_dir / f"epoch_{universe.epoch:010d}"
     save_checkpoint(universe, checkpoint_path)
     saved_path = checkpoint_file_path(checkpoint_path)
-    with RunStore(db_path) as store:
-        store.record_metrics(run_id, universe.epoch, compute_metrics(universe))
-        store.record_event(run_id, universe.epoch, "checkpoint_saved", {"path": str(saved_path)})
-    st.session_state.auto_checkpoint_last_epoch = universe.epoch
+    with RunStore(run_info["db_path"]) as store:
+        store.record_metrics(run_info["run_id"], universe.epoch, compute_metrics(universe))
+        store.record_event(
+            run_info["run_id"], universe.epoch, "checkpoint_saved", {"path": str(saved_path)}
+        )
+    run_info["checkpoint_epoch"] = universe.epoch
+    run_info["checkpoint_path"] = str(saved_path)
 
 
 def _step(num_epochs: int) -> None:
@@ -253,8 +293,12 @@ def _step(num_epochs: int) -> None:
         if recorder is not None:
             recorder.record(universe)
         _maybe_auto_scan(universe)
-        _maybe_auto_checkpoint(universe)
-    st.session_state.history.append(compute_metrics(universe))
+        _maybe_checkpoint(universe)
+    metrics = compute_metrics(universe)
+    st.session_state.history.append(metrics)
+    run_info = st.session_state.loaded_run_info
+    with RunStore(run_info["db_path"]) as store:
+        store.record_metrics(run_info["run_id"], universe.epoch, metrics)
 
 
 st.title("Computational Life Lab")
@@ -278,37 +322,73 @@ with st.sidebar:
     if "universe" not in st.session_state:
         _init_universe(config_name, seed_override)
 
-    st.divider()
-    st.header("Load stored run")
+    run_info = st.session_state.loaded_run_info
     st.caption(
-        "Open a run saved via `life run --db ...` or `life sweep --db ...` -- "
-        "including one that ran for hours -- and continue it from its last "
-        "checkpoint."
+        f"**Run #{run_info['run_id']}** · {run_info['experiment_name']} · "
+        f"`{run_info['db_path']}`"
     )
-    discovered_dbs = sorted(str(p.relative_to(REPO_ROOT)) for p in RUNS_DIR.glob("*.db")) if RUNS_DIR.is_dir() else []
-    db_path_text = st.text_input(
-        "Database path", value=discovered_dbs[0] if discovered_dbs else "", key="load_db_path"
+    st.number_input(
+        "Checkpoint interval (epochs)",
+        min_value=10,
+        value=DEFAULT_CHECKPOINT_INTERVAL,
+        step=50,
+        key="checkpoint_interval",
+        help="How often this run's full population state is saved to disk "
+        "during Step/Play -- same as `life run`'s --checkpoint-interval. "
+        "Every run started here is persisted from the start; this only "
+        "controls how often the (heavier) full-population checkpoint is "
+        "written, not whether metrics are recorded.",
     )
-    db_path = Path(db_path_text) if db_path_text.strip() else None
-    if db_path is not None and db_path.is_file():
-        with RunStore(db_path) as browse_store:
-            stored_runs = browse_store.list_runs()
-        if not stored_runs:
-            st.caption("This database has no runs.")
-        else:
-            run_labels = {
-                f"#{r['id']} {r['experiment_name']} (seed={r['seed']}, "
-                f"epoch={r['final_epoch']}, {r['status']})": r["id"]
-                for r in stored_runs
-            }
-            selected_label = st.selectbox("Run", list(run_labels.keys()), key="load_run_label")
-            if st.button("Load this run", width="stretch"):
+    # The actual "last checkpoint" status is shown in the main body, not
+    # here -- Step/Play is handled further down this same sidebar block,
+    # so a caption placed here would only ever reflect state as of
+    # *before* the click that just ran, one rerun stale.
+
+    st.divider()
+    st.header("Browse runs")
+    st.caption(
+        "Every run across every `runs/*.db` file, most recent first -- "
+        "select one and load it, whether it was started here or via "
+        "`life run` / `life sweep`."
+    )
+    all_runs = _discover_all_runs()
+    if not all_runs:
+        st.caption("No runs found yet under `runs/`.")
+    else:
+        runs_table = pd.DataFrame(
+            [
+                {
+                    "id": r["id"],
+                    "experiment": r["experiment_name"],
+                    "status": r["status"],
+                    "epoch": r["current_epoch"],
+                    "seed": r["seed"],
+                    "started": datetime.fromtimestamp(r["started_at"]).strftime(
+                        "%Y-%m-%d %H:%M"
+                    ),
+                    "database": r["db_path"],
+                }
+                for r in all_runs
+            ]
+        )
+        run_event = st.dataframe(
+            runs_table,
+            hide_index=True,
+            width="stretch",
+            on_select="rerun",
+            selection_mode="single-row",
+            key="runs_browser_table",
+        )
+        selected_rows = run_event.selection.rows
+        if selected_rows:
+            chosen = all_runs[selected_rows[0]]
+            if st.button(
+                f"Load run #{chosen['id']} ({chosen['experiment_name']})", width="stretch"
+            ):
                 try:
-                    _load_stored_run(db_path, run_labels[selected_label])
+                    _load_stored_run(REPO_ROOT / chosen["db_path"], chosen["id"])
                 except (LookupError, FileNotFoundError) as exc:
                     st.error(str(exc))
-    elif db_path is not None:
-        st.caption("No database found at that path.")
 
     st.divider()
     st.header("Time controls")
@@ -358,41 +438,24 @@ with st.sidebar:
             "method as `life run --replication-scan-interval`."
         )
 
-    st.divider()
-    auto_checkpoint = st.checkbox(
-        "Auto-checkpoint to disk (recover after disconnect)", key="auto_checkpoint"
-    )
-    if auto_checkpoint:
-        st.number_input(
-            "Checkpoint interval (epochs)",
-            min_value=10,
-            value=500,
-            step=50,
-            key="auto_checkpoint_interval",
-        )
-        st.caption(
-            "Saves a checkpoint + `checkpoint_saved` event every N epochs "
-            "during Step/Play -- same as `life run --db --checkpoint-dir "
-            "--checkpoint-interval`. A run started here otherwise lives "
-            "only in this browser session's memory; if that session is "
-            "ever lost (closed tab, disconnect overnight, ...), the run "
-            "is gone with no way back. With this on, reload the dashboard "
-            "and use \"Load stored run\" above to resume from the last "
-            "checkpoint instead. Writes to this run's existing database "
-            "if loaded via \"Load stored run\", otherwise creates "
-            "`runs/dashboard_autosave.db`."
-        )
-
 universe: BffSoupUniverse = st.session_state.universe
 config = st.session_state.config
 
-loaded_run_info = st.session_state.get("loaded_run_info")
-if loaded_run_info:
+run_info = st.session_state.loaded_run_info
+if run_info["resumed_from_epoch"] is not None:
     st.info(
-        f"Viewing run #{loaded_run_info['run_id']} ({loaded_run_info['experiment_name']}) "
-        f"from `{loaded_run_info['db_path']}`, resumed from its checkpoint at epoch "
-        f"{loaded_run_info['checkpoint_epoch']}. Stepping/playing from here continues "
+        f"Viewing run #{run_info['run_id']} ({run_info['experiment_name']}) "
+        f"from `{run_info['db_path']}`, resumed from its checkpoint at epoch "
+        f"{run_info['resumed_from_epoch']}. Stepping/playing from here continues "
         "this run forward; it does not modify the saved files."
+    )
+
+if run_info["checkpoint_epoch"] is not None:
+    st.caption(f"Last checkpoint: epoch {run_info['checkpoint_epoch']}.")
+else:
+    st.caption(
+        "No checkpoint saved yet -- the first lands at the checkpoint "
+        "interval set in the sidebar."
     )
 
 if st.session_state.get("auto_scan"):
@@ -405,13 +468,6 @@ if st.session_state.get("auto_scan"):
             f"Last auto-scan: epoch {last['epoch']}, best score "
             f"{last['best_score']}/{last['genome_length']} ({last['classification']})."
         )
-
-if st.session_state.get("auto_checkpoint"):
-    last_checkpoint_epoch = st.session_state.get("auto_checkpoint_last_epoch")
-    if last_checkpoint_epoch is not None:
-        autosave = st.session_state.get("auto_checkpoint_run_info")
-        checkpoint_db = loaded_run_info["db_path"] if loaded_run_info else autosave["db_path"]
-        st.caption(f"Last auto-checkpoint: epoch {last_checkpoint_epoch} (saved to `{checkpoint_db}`).")
 
 status_cols = st.columns(4)
 status_cols[0].metric("Epoch", universe.epoch)
@@ -812,7 +868,7 @@ st.caption(
     "(spec section 26)."
 )
 compare_discovered_dbs = (
-    sorted(str(p.relative_to(REPO_ROOT)) for p in RUNS_DIR.glob("*.db")) if RUNS_DIR.is_dir() else []
+    sorted(_display_path(p) for p in RUNS_DIR.glob("*.db")) if RUNS_DIR.is_dir() else []
 )
 compare_db_text = st.text_input(
     "Database path",

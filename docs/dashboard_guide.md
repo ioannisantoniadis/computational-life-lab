@@ -17,13 +17,41 @@ here and continued via `life run --resume-from`, produce identical
 numbers. This page walks through every section, in the order they
 appear.
 
-## Starting a run
+## Starting a run, and how it's persisted
 
 **Experiment** (sidebar): pick a shipped config (see
 [`configuration.md`](configuration.md#shipped-configs)), optionally
-override its seed, and click **Reset / (Re)initialize**. This always
-starts a fresh random population from the chosen config — for
-continuing a previous run, see "Load stored run" below instead.
+override its seed, and click **Reset / (Re)initialize**. This starts a
+fresh random population from the chosen config — for continuing a
+previous run instead, see "Browse runs" below.
+
+Every run started this way is registered immediately with a real
+`run_id`, in exactly the same database-backed sense `life run --db ...`
+registers one before its first epoch — a dashboard run is not a
+second-class, memory-only thing. The sidebar caption right under Reset
+(`Run #N · experiment_name · path/to.db`) confirms which run you're on
+before you've stepped even once. Unless you were loaded from an
+existing `--db` run (see below), this writes to a shared
+`runs/dashboard_runs.db`.
+
+Two things are always happening, not gated behind any checkbox:
+
+- **Metrics** are recorded to that run's database after every Step
+  click or Play iteration — the same granularity already shown in the
+  on-screen charts.
+- **Checkpoints** (the full population + RNG state, i.e. what's needed
+  to actually resume, not just chart) are saved every **"Checkpoint
+  interval (epochs)"** (sidebar, default 500) — the dashboard's
+  equivalent of `life run`'s `--checkpoint-interval`. A caption in the
+  main body ("Last checkpoint: epoch E") tracks the most recent one.
+
+This exists because a run only ever lives in this browser session's
+process memory otherwise; if that session is lost — a closed tab, an
+inactive tab discarded to save memory, a network blip — there would be
+no way back, even though the dashboard's own server process might still
+be running fine. With checkpointing always on, reloading the dashboard
+and using "Browse runs" resumes from the last checkpoint instead of
+losing the run.
 
 **Time controls** (sidebar): **Step** advances the loaded universe by
 "epochs per step" epochs; **Play** repeats that automatically (roughly
@@ -31,18 +59,26 @@ every 50ms) until **Pause**. Both call `universe.step_epoch()` directly
 — there is no separate "preview" mode, this is the real engine running
 live in your browser session.
 
-## Loading a run you started elsewhere
+## Browsing and loading runs
 
-**Load stored run** (sidebar): point it at a `--db` SQLite file (it
-auto-discovers `runs/*.db`), pick a run from the list, and load it. If
-that run has a saved checkpoint (see [`cli_reference.md`](cli_reference.md#life-run)),
-this does two things at once:
+**Browse runs** (sidebar): a table listing every run across every
+`runs/*.db` file — whatever was started here, via `life run`, or via
+`life sweep` — most recent first, with its id, experiment name,
+status, current epoch, seed, and source database. No need to know or
+guess which file a run lives in first, unlike pointing at one database
+path by hand. Select a row's checkbox, then click the "Load run #N
+(...)" button that appears.
+
+If that run has a saved checkpoint (see [`cli_reference.md`](cli_reference.md#life-run)),
+loading it does two things at once:
 
 1. Restores the **actual** population, ancestry bookkeeping, and RNG
    substream state via `storage.checkpoints.load_checkpoint` — not a
    read-only summary. The loaded universe is a fully live
    `BffSoupUniverse`; Step and Play continue it forward exactly like any
-   other universe, from precisely where the checkpoint left off.
+   other universe, from precisely where the checkpoint left off, and
+   metrics/checkpoints keep being persisted into that same run's own
+   database and checkpoint directory from then on.
 2. Pulls in the run's full metrics history from the database, so the
    charts show the real trajectory from epoch 0 onward, not just
    whatever happens to accumulate in this browser session.
@@ -124,42 +160,18 @@ checkbox that runs the same replication-consistency check as `life run
 --replication-scan-interval` (see
 [`cli_reference.md`](cli_reference.md#life-run)) automatically every
 "scan interval" epochs while you Step or Play, instead of only finding
-out via the manual scan section further down the page. A caption below
-the "Load stored run" banner shows the most recent scan's epoch, best
-score, and classification, and a success banner appears the first time
-a candidate replicator is seen, so a multi-day run doesn't need
-constant manual checking to notice when something interesting emerges.
-If the session was loaded via "Load stored run" (so a database and run
-id are known), each scan is also persisted as a `replication_scan`
+out via the manual scan section further down the page. A caption in
+the main body shows the most recent scan's epoch, best score, and
+classification, and a success banner appears the first time a
+candidate replicator is seen, so a multi-day run doesn't need constant
+manual checking to notice when something interesting emerges. Every
+session now has a real run_id/database from the start (see "Starting a
+run" above), so each scan is always persisted as a `replication_scan`
 event and the first detection as a `candidate_replicator_detected`
-event — identical to what `--db` does for the CLI — so it shows up in
-`life analyze` too; a fresh, unattached session only shows the result
-live. Interval and sample size persist across Reset the same way
-"Track lineage" does; only the last-result/first-detection state resets.
-
-**Auto-checkpoint to disk (recover after disconnect)** (sidebar, under
-Analysis): opt-in checkbox that saves a checkpoint every "checkpoint
-interval" epochs while you Step or Play — the dashboard's own
-equivalent of `life run --db --checkpoint-dir --checkpoint-interval`
-(see [`cli_reference.md`](cli_reference.md#life-run)).
-
-This exists because a run started via "Reset / (Re)initialize" lives
-*only* in this browser session's memory — nothing is written to disk
-unless you turn this on. If that session is ever lost (a closed tab,
-an overnight disconnect, the browser discarding an inactive tab to
-save memory), the run is gone with no way back, even though the
-dashboard's own server process may still be running — there is simply
-no durable copy of the state anywhere. With auto-checkpoint on,
-reloading the dashboard after a lost session and using "Load stored
-run" above resumes from the last checkpoint instead of starting over.
-
-If this session was itself loaded via "Load stored run", checkpoints
-continue into that run's *existing* database and checkpoint directory
-(so `life analyze`/`life list-runs` on the original `--db` see the
-dashboard's checkpoints too); otherwise a new database is created at
-`runs/dashboard_autosave.db`, auto-discovered by "Load stored run"
-after a reload — the same discovery mechanism, not a separate recovery
-path. A caption shows the most recent checkpoint's epoch and database.
+event — identical to what `--db` does for the CLI — showing up in
+`life analyze` too. Interval and sample size persist across Reset the
+same way "Track lineage" does; only the last-result/first-detection
+state resets.
 
 ## Debugging execution by hand
 

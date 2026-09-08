@@ -8,9 +8,25 @@ happens to click around in a browser.
 
 from pathlib import Path
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 APP_PATH = Path(__file__).resolve().parents[2] / "app" / "streamlit_app.py"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_runs_dir(tmp_path, monkeypatch):
+    """Every dashboard run now registers itself in a real database from
+    the moment it's created (see _register_new_run in streamlit_app.py),
+    not just when some opt-in feature is enabled -- so without this,
+    every test in this file would write real rows and checkpoint files
+    into the actual project's runs/ directory. Redirects via the same
+    env var streamlit_app.py itself reads, since AppTest re-execs the
+    script in a fresh module namespace on every run -- monkeypatching an
+    imported module's attribute wouldn't reach that separate execution.
+    """
+    monkeypatch.setenv("COMPUTATIONAL_LIFE_RUNS_DIR", str(tmp_path / "runs"))
+    return tmp_path / "runs"
 
 
 def test_app_loads_without_exception():
@@ -134,7 +150,9 @@ def test_replicator_scan_runs_and_shows_results():
     scan_button = next(b for b in at.button if b.label == "Run scan")
     scan_button.click().run(timeout=60)
     assert not at.exception
-    assert len(at.dataframe) == 1
+    # One dataframe is always present now (the sidebar's "Browse runs"
+    # table); this scan adds a second one for its results.
+    assert len(at.dataframe) == 2
 
 
 def test_auto_scan_checkbox_reveals_interval_and_sample_size_inputs():
@@ -205,14 +223,19 @@ def test_auto_scan_flags_first_candidate_detection(monkeypatch):
     assert sum(1 for s in at.success if "first detected" in s.value) == 1
 
 
-def _create_stored_run_with_checkpoint(tmp_path) -> tuple[Path, int]:
-    """Runs the real CLI to produce a genuine --db + --checkpoint-dir run,
-    the same way a long overnight run would -- rather than hand-building
-    fixtures that might not match what the CLI actually produces.
+def _create_stored_run_with_checkpoint(runs_dir: Path) -> tuple[Path, int]:
+    """Runs the real CLI to produce a genuine --db + --checkpoint-dir run
+    inside the (isolated, per-test) runs directory, the same way a long
+    overnight run would -- rather than hand-building fixtures that might
+    not match what the CLI actually produces. Placing it under
+    ``runs_dir`` (the _isolated_runs_dir fixture's directory) means the
+    dashboard's own "Browse runs" table auto-discovers it, exactly as it
+    would discover a real run under the project's actual runs/.
     """
     from computational_life.cli import main
 
-    config_path = tmp_path / "fast.yaml"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    config_path = runs_dir / "fast.yaml"
     config_path.write_text(
         "experiment: bff_soup\n"
         "name: loadable_test\n"
@@ -221,8 +244,8 @@ def _create_stored_run_with_checkpoint(tmp_path) -> tuple[Path, int]:
         "execution:\n  max_steps: 100\n"
         "run:\n  epochs: 6\n  report_interval: 2\n"
     )
-    db_path = tmp_path / "loadable.db"
-    checkpoint_dir = tmp_path / "checkpoints"
+    db_path = runs_dir / "loadable.db"
+    checkpoint_dir = runs_dir / "checkpoints"
     main(
         [
             "run",
@@ -238,21 +261,39 @@ def _create_stored_run_with_checkpoint(tmp_path) -> tuple[Path, int]:
     return db_path, 1  # first run in a fresh database always gets id 1
 
 
-def test_load_stored_run_restores_population_and_history(tmp_path, capsys):
-    db_path, run_id = _create_stored_run_with_checkpoint(tmp_path)
+def _select_and_load_run(at: AppTest, experiment_name: str) -> None:
+    """Simulate selecting a row in the "Browse runs" table and clicking
+    its "Load run #..." button. AppTest has no click-a-dataframe-row
+    helper, but st.dataframe's own selection state can be set
+    programmatically through session_state (the same mechanism a real
+    click updates), per Streamlit's own docs for DataframeState -- but
+    that injected selection only takes effect for the one script rerun
+    immediately after it's set (a real frontend click would re-send it
+    on every subsequent interaction; a bare programmatic override
+    doesn't), so it has to be re-asserted right before the run that
+    processes the button click too, not only once up front.
+    """
+    table = at.dataframe[0].value
+    row_index = int(table.index[table["experiment"] == experiment_name][0])
+    run_id = int(table.loc[row_index, "id"])
+    at.session_state["runs_browser_table"] = {"selection": {"rows": [row_index]}}
+    at.run(timeout=30)
+
+    load_button = next(
+        b for b in at.button if b.label == f"Load run #{run_id} ({experiment_name})"
+    )
+    at.session_state["runs_browser_table"] = {"selection": {"rows": [row_index]}}
+    load_button.click().run(timeout=30)
+
+
+def test_load_stored_run_restores_population_and_history(capsys, _isolated_runs_dir):
+    _create_stored_run_with_checkpoint(_isolated_runs_dir)
     capsys.readouterr()
 
     at = AppTest.from_file(str(APP_PATH))
     at.run(timeout=30)
 
-    at.text_input(key="load_db_path").set_value(str(db_path)).run(timeout=30)
-    assert not at.exception
-
-    run_select = at.selectbox(key="load_run_label")
-    assert f"#{run_id}" in run_select.options[0]
-    run_select.select(run_select.options[0]).run(timeout=30)
-
-    next(b for b in at.button if b.label == "Load this run").click().run(timeout=30)
+    _select_and_load_run(at, "loadable_test")
     assert not at.exception
 
     # The run finished at epoch 6, with its last checkpoint also at epoch 6.
@@ -261,16 +302,13 @@ def test_load_stored_run_restores_population_and_history(tmp_path, capsys):
     assert any("Viewing run #1" in info.value for info in at.info)
 
 
-def test_load_stored_run_can_be_resumed_by_stepping(tmp_path, capsys):
-    db_path, run_id = _create_stored_run_with_checkpoint(tmp_path)
+def test_load_stored_run_can_be_resumed_by_stepping(capsys, _isolated_runs_dir):
+    _create_stored_run_with_checkpoint(_isolated_runs_dir)
     capsys.readouterr()
 
     at = AppTest.from_file(str(APP_PATH))
     at.run(timeout=30)
-    at.text_input(key="load_db_path").set_value(str(db_path)).run(timeout=30)
-    run_select = at.selectbox(key="load_run_label")
-    run_select.select(run_select.options[0]).run(timeout=30)
-    next(b for b in at.button if b.label == "Load this run").click().run(timeout=30)
+    _select_and_load_run(at, "loadable_test")
 
     next(ni for ni in at.number_input if ni.label == "Epochs per step").set_value(3).run(
         timeout=30
@@ -282,76 +320,99 @@ def test_load_stored_run_can_be_resumed_by_stepping(tmp_path, capsys):
     assert epoch_metric.value == "9"  # 6 (loaded) + 3 more
 
 
-def test_auto_checkpoint_checkbox_reveals_interval_input():
+def test_reset_immediately_registers_a_run_id():
+    # "the same process as the back-end": a run started here should get
+    # a real run_id right away, before any stepping -- not only once
+    # some opt-in feature is switched on.
     at = AppTest.from_file(str(APP_PATH))
     at.run(timeout=30)
-    assert not any(ni.key == "auto_checkpoint_interval" for ni in at.number_input)
-
-    at.checkbox(key="auto_checkpoint").set_value(True).run(timeout=30)
     assert not at.exception
-    assert any(ni.key == "auto_checkpoint_interval" for ni in at.number_input)
+    assert any(c.value.startswith("**Run #") for c in at.caption)
+
+    reset_button = next(b for b in at.button if "Reset" in b.label)
+    reset_button.click().run(timeout=30)
+    assert not at.exception
+    assert any(c.value.startswith("**Run #") for c in at.caption)
 
 
-def test_auto_checkpoint_continues_a_loaded_runs_own_database(tmp_path, capsys):
-    # Exercises the "session was loaded via Load stored run" branch of
-    # _maybe_auto_checkpoint -- it should write into that same run's
-    # existing database and checkpoint directory rather than creating a
-    # separate one, so `life analyze`/`life list-runs` on the original
-    # --db see the dashboard's checkpoints too.
+def test_checkpoint_interval_input_always_visible_and_persists_to_disk(_isolated_runs_dir):
     from computational_life.storage.database import RunStore
 
-    db_path, run_id = _create_stored_run_with_checkpoint(tmp_path)
-    capsys.readouterr()
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+    # No checkbox to enable first -- persistence is on by default now.
+    assert any(ni.key == "checkpoint_interval" for ni in at.number_input)
+
+    at.number_input(key="checkpoint_interval").set_value(10).run(timeout=30)
+    next(ni for ni in at.number_input if ni.label == "Epochs per step").set_value(10).run(
+        timeout=30
+    )
+    next(b for b in at.button if b.label == "Step").click().run(timeout=30)
+    assert not at.exception
+    assert any("Last checkpoint: epoch 10" in c.value for c in at.caption)
+
+    db_path = _isolated_runs_dir / "dashboard_runs.db"
+    with RunStore(db_path) as store:
+        events = store.get_events(1)
+    checkpoint_events = [e for e in events if e["kind"] == "checkpoint_saved"]
+    assert len(checkpoint_events) == 1
+    assert checkpoint_events[0]["epoch"] == 10
+    assert Path(checkpoint_events[0]["payload"]["path"]).exists()
+
+
+def test_metrics_are_persisted_every_step_not_only_at_checkpoints(_isolated_runs_dir):
+    # checkpoint_interval defaults to 500; a single small Step should
+    # still leave a metrics row behind, since metrics recording isn't
+    # gated by the (much heavier) checkpoint cadence.
+    from computational_life.storage.database import RunStore
 
     at = AppTest.from_file(str(APP_PATH))
     at.run(timeout=30)
-    at.text_input(key="load_db_path").set_value(str(db_path)).run(timeout=30)
-    run_select = at.selectbox(key="load_run_label")
-    run_select.select(run_select.options[0]).run(timeout=30)
-    next(b for b in at.button if b.label == "Load this run").click().run(timeout=30)
-
-    at.checkbox(key="auto_checkpoint").set_value(True).run(timeout=30)
-    at.number_input(key="auto_checkpoint_interval").set_value(10).run(timeout=30)
-    next(ni for ni in at.number_input if ni.label == "Epochs per step").set_value(4).run(
+    next(ni for ni in at.number_input if ni.label == "Epochs per step").set_value(3).run(
         timeout=30
     )
-
     next(b for b in at.button if b.label == "Step").click().run(timeout=30)
     assert not at.exception
-    # Loaded at epoch 6 (see _create_stored_run_with_checkpoint), +4 more = 10,
-    # which is a multiple of the interval, so a checkpoint should fire.
-    assert any("Last auto-checkpoint: epoch 10" in c.value for c in at.caption)
 
+    db_path = _isolated_runs_dir / "dashboard_runs.db"
     with RunStore(db_path) as store:
-        events = store.get_events(run_id)
-    checkpoint_events = [e for e in events if e["kind"] == "checkpoint_saved"]
-    new_event = next(e for e in checkpoint_events if e["epoch"] == 10)
-    saved_path = Path(new_event["payload"]["path"])
-    assert saved_path.exists()
-    # Continues into the same run's own checkpoint directory, not a
-    # separate one -- the original CLI run's checkpoints live there too.
-    assert saved_path.parent == (tmp_path / "checkpoints" / f"run_{run_id}")
+        history = store.get_metrics_history(1)
+    assert any(row["epoch"] == 3 for row in history)
 
 
-def test_load_stored_run_without_checkpoint_shows_error(tmp_path):
+def test_browse_runs_lists_runs_across_multiple_databases(_isolated_runs_dir):
+    _create_stored_run_with_checkpoint(_isolated_runs_dir)
+
+    at = AppTest.from_file(str(APP_PATH))
+    at.run(timeout=30)
+    assert not at.exception
+
+    table = at.dataframe[0].value
+    # The freshly (re)initialized default session (in dashboard_runs.db)
+    # and the CLI-produced run (in loadable.db) should both be listed,
+    # tagged with their own database.
+    assert "bff_dev" in table["experiment"].values
+    assert "loadable_test" in table["experiment"].values
+    assert table["database"].nunique() == 2
+
+
+def test_load_stored_run_without_checkpoint_shows_error(_isolated_runs_dir):
     from computational_life.cli import main
 
-    config_path = tmp_path / "fast.yaml"
+    _isolated_runs_dir.mkdir(parents=True, exist_ok=True)
+    config_path = _isolated_runs_dir / "fast.yaml"
     config_path.write_text(
         "experiment: bff_soup\nname: no_checkpoint\nseed: 1\n"
         "population:\n  size: 8\n  genome_length: 8\n"
         "execution:\n  max_steps: 50\n"
         "run:\n  epochs: 2\n"
     )
-    db_path = tmp_path / "no_checkpoint.db"
+    db_path = _isolated_runs_dir / "no_checkpoint.db"
     main(["run", str(config_path), "--db", str(db_path)])  # no --checkpoint-dir
 
     at = AppTest.from_file(str(APP_PATH))
     at.run(timeout=30)
-    at.text_input(key="load_db_path").set_value(str(db_path)).run(timeout=30)
-    run_select = at.selectbox(key="load_run_label")
-    run_select.select(run_select.options[0]).run(timeout=30)
-    next(b for b in at.button if b.label == "Load this run").click().run(timeout=30)
+    _select_and_load_run(at, "no_checkpoint")
 
     assert not at.exception
     assert any("no saved checkpoint" in e.value for e in at.error)
