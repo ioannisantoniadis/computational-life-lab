@@ -57,7 +57,8 @@ life run experiments/configs/bff_dev.yaml --epochs 200
 life run experiments/configs/bff_baseline.yaml --db runs/baseline.db \
     --checkpoint-dir runs/baseline_checkpoints --checkpoint-interval 500 \
     --replication-scan-interval 500
-life run experiments/configs/bff_dev.yaml --resume-from runs/baseline_checkpoints/run_1/epoch_0000000500 --epochs 500
+life run experiments/configs/bff_baseline.yaml --db runs/baseline.db \
+    --resume-from runs/baseline_checkpoints/run_1/epoch_0000000500 --epochs 500
 ```
 
 ## `life sweep`

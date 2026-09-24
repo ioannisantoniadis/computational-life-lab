@@ -130,7 +130,11 @@ genome, via the dashboard's genome inspector or `life inspect
 (sweeps, or the dashboard's "Scan for candidate replicators").
 `replication_scores()` is vectorized across candidates using the same
 `BatchBffInterpreter` the main epoch loop uses, so scanning e.g. 200
-candidates costs roughly the same wall time as one candidate, not 200x.
+candidates costs far less than 200x a single candidate's wall time (the
+batch runs every candidate's trials in lockstep and only stops once all
+lanes have halted) — not literally the same wall time as one candidate,
+since a larger batch is more likely to contain a slow-to-halt outlier
+that the whole batch waits on.
 
 ## Lineage tracking (`analysis/lineage.py`)
 
