@@ -39,12 +39,16 @@ a cellular automaton with 29 possible states per cell, proving a
 self-reproducing configuration was possible in principle. The work was
 unfinished at his death in 1957 and was completed and published
 posthumously by Arthur W. Burks as *Theory of Self-Reproducing
-Automata* (1966). It wasn't actually run on a computer until Umberto
-Pesavento's 1994 implementation — the proof long predated the
+Automata* (1966). It wasn't implemented on a computer until Umberto
+Pesavento's 1995 implementation — the proof long predated the
 demonstration. This is the conceptual ancestor of every self-
 replicating-program experiment since, including this one: it's the
 first place "a program that constructs a copy of itself" was treated as
 a rigorous, checkable claim rather than a metaphor.
+
+> Pesavento, U. (1995). *An Implementation of von Neumann's
+> Self-Reproducing Machine.* Artificial Life, 2(4).
+> [ACM DL](https://dl.acm.org/doi/abs/10.5555/1667965.1667966)
 
 ### Core War (1984)
 

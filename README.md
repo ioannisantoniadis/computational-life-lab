@@ -59,6 +59,9 @@ pip install -e ".[dev]"       # core + CLI + test tooling
 pip install -e ".[ui]"        # also needed for the Streamlit dashboard
 ```
 
+Or, with [uv](https://docs.astral.sh/uv/) and the exact versions CI uses (`uv.lock`):
+`uv sync --extra dev --extra ui`, then prefix commands with `uv run`.
+
 ## Quickstart
 
 ```bash
@@ -197,3 +200,11 @@ how this project relates to each.
   full canonical scale for its full epoch count; every verification so
   far has been at reduced population/epoch counts. See "Performance"
   above.
+- The replication detector has been calibrated on real self-replicators from the
+  authors' reference implementation, and agrees with it at the population level, but at
+  a different threshold from the paper's; see
+  [`docs/analysis_methods.md`](docs/analysis_methods.md#calibration-against-the-reference-implementation-2026-10-02).
+
+## License
+
+Apache License 2.0. See [`LICENSE`](LICENSE). BFF semantics follow the paper authors' reference implementation ([`cubff`](https://github.com/paradigms-of-intelligence/cubff), also Apache-2.0); no code from it is copied here (see [`docs/bff_semantics.md`](docs/bff_semantics.md)).

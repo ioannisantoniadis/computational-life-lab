@@ -136,6 +136,51 @@ lanes have halted) — not literally the same wall time as one candidate,
 since a larger batch is more likely to contain a slow-to-halt outlier
 that the whole batch waits on.
 
+### Calibration against the reference implementation (2026-10-02)
+
+The detector was checked on genuine self-replicators, not only on inert genomes.
+
+- **Source of replicators.** The paper authors' `cubff` (commit `f212e84`), built for CPU,
+  reproduced its own `testdata/bff_noheads.txt` golden log byte for byte. A soup run with
+  `--lang bff_noheads --seed 2` and cubff's defaults (131,072 programs, mutation 2⁻¹²) went
+  through the state transition between epochs 11,521 (3 programs passing cubff's
+  `CheckSelfRep`) and 11,585 (20,462). Seed 1 ran 20,000 epochs without a transition.
+- **Population-level agreement.** On 3,000 random genomes from the epoch-11,585 soup, this
+  project's `replication_scores` gave a score ≥ 5 to 16.3% (95% CI 15.0–17.7%); cubff's own
+  count at its threshold (`kSelfrepThreshold = 5`) is 15.6%. The score distribution is
+  bimodal: most genomes score 0, most replicators score 58–64.
+- **Positive-control test.** Three of those replicators (each 64/64 here) are fixtures in
+  `tests/analysis/test_replication_positive_control.py`, with this provenance.
+
+- **Engine continuation.** The epoch-11,585 cubff soup was loaded into this project's
+  `BffSoupUniverse` (same population, mutation 2⁻¹², zero head init) and run forward,
+  sampling 1,000 genomes every 16 epochs. The first replicator wave decayed as it did in
+  cubff from the same soup (fraction scoring ≥ 5):
+
+  | Epochs after loading | 0 | 16 | 32 | 64 | 96 | 128 | 160 | 192 | 224 |
+  |---|---|---|---|---|---|---|---|---|---|
+  | cubff | 15.6% | 10.8% | 6.4% | 2.4% | 1.0% | 0.5% | 0.4% | 3.5% | 78% |
+  | this engine | 15.3% | 10.1% | 6.0% | 2.2% | 1.2% | 0.2% | 0.4% | 0.6% | 0.2% |
+
+  In cubff a second, fitter replicator then took over (95.6% by +272 epochs). This engine had
+  not produced a second wave by +224, when the run was stopped. With different random
+  streams, *when* (and in a finite run, *whether*) a fitter variant appears is a chance
+  event, so one run cannot say whether this is chance or a difference in dynamics; several
+  seeded continuations would.
+- **Complexity metric offset.** On the same cubff soups, the paper's Brotli-based
+  high-order entropy (recomputed here; it reproduces cubff's logged values exactly) and this
+  project's zlib `structural_redundancy` were 0.126 vs 0.301 just before the transition and
+  1.723 vs 1.837 just after. Both show the transition; the absolute values differ by about
+  0.1–0.2 bits/byte and should not be quoted against the paper's figures. Installing
+  `brotli` and compressing with `quality=2` would reproduce the paper's metric exactly.
+
+**Thresholds differ from the paper's.** cubff, and therefore the paper's statistics such as
+"self-replicators emerged in ~40% of runs", count a program as a self-replicator at a score
+of **5**. `classify()` labels "candidate" from 50% (32/64) and "high-fidelity" from 90%. On
+the same soup, ≥ 32 catches 9.7% of programs against cubff's 15.6%, so counts made with
+`classify()` are not comparable with the paper's. Use `replication_scores(...) >= 5` when
+comparing with the paper.
+
 ## Lineage tracking (`analysis/lineage.py`)
 
 `BffSoupUniverse` only ever holds the *current* generation's immediate
